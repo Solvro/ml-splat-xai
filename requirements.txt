@@ -1,0 +1,5 @@
+tqdm
+plyfile
+torch>=1.10
+einops>=0.6.1
+taichi>=1.6.0
