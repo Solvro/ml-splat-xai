@@ -1,5 +1,4 @@
 import torch
-
 from einops import repeat, rearrange
 
 
@@ -30,11 +29,9 @@ def farthest_point_sampling(x: torch.Tensor, n_sample: int, start_idx: int = Non
     cur_x = rearrange(x[torch.arange(b), sel_idx[:, 0]], 'b c -> b 1 c')
     min_dists = torch.full((b, n), dtype=x.dtype, device=x.device, fill_value=float('inf'))
     for i in range(1, n_sample):
-        # update distance
         dists = torch.linalg.norm(x - cur_x, dim=-1)
         min_dists = torch.minimum(dists, min_dists)
 
-        # take the farthest
         idx_farthest = torch.max(min_dists, dim=-1).indices
         sel_idx[:, i] = idx_farthest
         cur_x[:, 0, :] = x[torch.arange(b), idx_farthest]

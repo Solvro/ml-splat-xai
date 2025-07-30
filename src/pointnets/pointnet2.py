@@ -6,8 +6,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import repeat, rearrange
 
-from .utils import farthest_point_sampling, ball_query_pytorch
-from .pointnet import STN
+from pointnets.utils import farthest_point_sampling, ball_query_pytorch
+from pointnets.pointnet import STN
 
 # whether to use taichi for ball query
 TAICHI = False
@@ -174,66 +174,6 @@ class UpBlock(nn.Module):
         ori_x = self.route(sub_x, sub_xyz, ori_x, ori_xyz)
         ori_x = self.conv(ori_x)
         return ori_x
-
-
-class PointNet2ClsSSG(nn.Module):
-
-    def __init__(
-            self,
-            in_dim,
-            out_dim,
-            *,
-            downsample_points=(512, 128),
-            radii=(0.2, 0.4),
-            ks=(32, 64),
-            head_norm=True,
-            dropout=0.5,
-    ):
-        super().__init__()
-        self.downsample_points = downsample_points
-
-        self.sa1 = SABlock(in_dim, [64, 64, 128], radii[0], ks[0])
-        self.sa2 = SABlock(128, [128, 128, 256], radii[1], ks[1])
-        self.global_sa = nn.Sequential(
-            nn.Conv1d(256, 256, 1, bias=False),
-            nn.BatchNorm1d(256),
-            nn.GELU(),
-            nn.Conv1d(256, 512, 1, bias=False),
-            nn.BatchNorm1d(512),
-            nn.GELU(),
-            nn.Conv1d(512, 1024, 1, bias=False),
-        )
-
-        norm = nn.BatchNorm1d if head_norm else nn.Identity
-        self.norm = norm(1024)
-        self.act = nn.GELU()
-
-        self.head = nn.Sequential(
-            nn.Linear(1024, 512, bias=False),
-            norm(512),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(512, 256, bias=False),
-            norm(256),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(256, out_dim)
-        )
-
-    def forward(self, x, xyz):
-        # x: (b, c, n)
-        # xyz: (b, 3, n)
-        xyz1 = downsample_fps(xyz, self.downsample_points[0]).xyz
-        x1 = self.sa1(x, xyz, xyz1)
-
-        xyz2 = downsample_fps(xyz1, self.downsample_points[1]).xyz
-        x2 = self.sa2(x1, xyz1, xyz2)
-
-        x3 = self.global_sa(x2)
-        out = x3.max(-1)[0]
-        out = self.act(self.norm(out))
-        out = self.head(out)
-        return out
 
 
 class PointNet2ClsMSG(nn.Module):
@@ -574,3 +514,62 @@ class PointNet2SegMSG(nn.Module):
 
         out = self.head(x)
         return out
+
+
+class PointNet2ClsSSG(nn.Module):
+    def __init__(
+            self,
+            in_dim,
+            out_dim,
+            *,
+            downsample_points=(512, 128),
+            radii=(0.2, 0.4),
+            ks=(32, 64),
+            head_norm=True,
+            dropout=0.5,
+    ):
+        super().__init__()
+        self.downsample_points = downsample_points
+
+        self.sa1 = SABlock(in_dim, [64, 64, 128], radii[0], ks[0])
+        self.sa2 = SABlock(128, [128, 128, 256], radii[1], ks[1])
+        self.global_sa = nn.Sequential(
+            nn.Conv1d(256, 256, 1, bias=False),
+            nn.BatchNorm1d(256),
+            nn.GELU(),
+            nn.Conv1d(256, 512, 1, bias=False),
+            nn.BatchNorm1d(512),
+            nn.GELU(),
+            nn.Conv1d(512, 1024, 1, bias=False),
+        )
+
+        norm = nn.BatchNorm1d if head_norm else nn.Identity
+        self.norm = norm(1024)
+        self.act = nn.GELU()
+
+        self.head = nn.Sequential(
+            nn.Linear(1024, 512, bias=False),
+            norm(512),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(512, 256, bias=False),
+            norm(256),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(256, out_dim)
+        )
+
+    def forward(self, x, xyz) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        xyz1 = downsample_fps(xyz, self.downsample_points[0]).xyz
+        x1 = self.sa1(x, xyz, xyz1)
+
+        xyz2 = downsample_fps(xyz1, self.downsample_points[1]).xyz
+        x2 = self.sa2(x1, xyz1, xyz2)
+
+        x3 = self.global_sa(x2)
+        global_feat = x3.max(-1)[0]
+        out_feat = self.act(self.norm(global_feat))
+        out = self.head(out_feat)
+        
+        features = [x, x1, x2, x3]
+        return out, features
