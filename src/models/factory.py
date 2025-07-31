@@ -20,7 +20,7 @@ class ModelBundle:
 
 
 def create_backbone_model(
-    model_name, device="cuda", custom_weights_path=None, num_classes=1000
+    model_name, device="cuda", custom_weights_path=None, num_classes=1000, freeze_model=True,
 ):
     if model_name not in model_list:
         raise ValueError(
@@ -45,6 +45,10 @@ def create_backbone_model(
         if custom_weights_path:
             state_dict = torch.load(custom_weights_path, map_location=device)
             base_model.load_state_dict(state_dict["model_state_dict"])
+
+        if freeze_model:
+            for param in base_model.parameters():
+                param.requires_grad = False
         
         backbone = create_3d_backbone(model_name, base_model)
         transform = None

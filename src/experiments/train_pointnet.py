@@ -32,7 +32,8 @@ def train_purity(config: DictConfig):
         config.model.name,
         device,
         config.model.custom_weights_path,
-        config.model.num_classes
+        config.model.num_classes,
+        config.model.freeze_model,
     )
     feature_model = feature_model.to(device).eval()
     print(f"Feature model {config.model.name} initialized.")
