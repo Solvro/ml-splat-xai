@@ -17,7 +17,7 @@ def generate_3d_prototypes(
     prototypes = {c: [] for c in range(num_channels)}
     global_sample_index = 0
 
-    for batch_idx, (xyz, gauss, _, indices) in tqdm(enumerate(dataloader), total=len(dataloader)):
+    for batch_idx, (xyz, gauss, _, indices) in tqdm(enumerate(dataloader), total=len(dataloader), desc="Generating prototypes"):
         xyz = xyz.to(device, non_blocking=True)
         gauss = gauss.to(device, non_blocking=True)
         
@@ -28,6 +28,8 @@ def generate_3d_prototypes(
         if U is not None:
             feature_map = torch.einsum("ij,bjn->bin", U, feature_map)
         
+        print(f"[generate_3d_prototypes] feature_map.shape: {feature_map.shape}")
+
         batch_activations = feature_map.max(dim=-1)[0]  # (B, C)
 
         for b in range(batch_activations.size(0)):

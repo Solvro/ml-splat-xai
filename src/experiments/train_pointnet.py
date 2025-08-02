@@ -32,6 +32,7 @@ def train_purity(config: DictConfig):
         config.model.name,
         device,
         config.model.custom_weights_path,
+        config.model.num_channels,
         config.model.num_classes,
         config.model.freeze_model,
     )
@@ -56,12 +57,12 @@ def train_purity(config: DictConfig):
     )
     print("Prototypes created.")
 
-    visualize_3d_prototypes(
-        positive_prototypes,
-        dataloader_train.dataset,
-        config.output_path,
-        "Base_prototypes"
-    )
+    # visualize_3d_prototypes(
+    #     positive_prototypes,
+    #     dataloader_train.dataset,
+    #     config.output_path,
+    #     "Base_prototypes"
+    # )
 
     prototype_dataloader = create_prototype_dataloader(
         positive_prototypes,
@@ -111,12 +112,12 @@ def train_purity(config: DictConfig):
     plot_path = os.path.join(config.output_path, f"{config.matrix.type}_train.png")
     trainer.plot_purity_over_epochs(plot_path)
 
-    visualize_3d_prototypes(
-        positive_prototypes,
-        dataloader_train.dataset,
-        config.output_path,
-        "Trained_prototypes"
-    )
+    # visualize_3d_prototypes(
+    #     positive_prototypes,
+    #     dataloader_train.dataset,
+    #     config.output_path,
+    #     "Trained_prototypes"
+    # )
 
     prototype_dataloader = create_prototype_dataloader(
         positive_prototypes,

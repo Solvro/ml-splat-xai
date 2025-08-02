@@ -3,9 +3,9 @@ output_path: outputs/pointnet
 
 model:
   name: pointnet2_ssg
-  custom_weights_path: null
+  custom_weights_path: best_model_msg.pt
   freeze_model: true
-  num_classes: 2
+  num_classes: 8
   num_channels: 1024
 
 dataset:

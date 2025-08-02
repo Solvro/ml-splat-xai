@@ -27,6 +27,7 @@ def explain_predictions(config: DictConfig):
         config.model.name,
         device,
         config.model.custom_weights_path,
+        config.model.num_channels,
         config.model.num_classes
     )
     feature_model = feature_model.to(device).eval()

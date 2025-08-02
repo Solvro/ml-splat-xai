@@ -20,22 +20,22 @@ class ModelBundle:
 
 
 def create_backbone_model(
-    model_name, device="cuda", custom_weights_path=None, num_classes=1000, freeze_model=True,
+    model_name, device="cuda", custom_weights_path=None, num_channels=1024, num_classes=1000, freeze_model=True,
 ):
     if model_name not in model_list:
         raise ValueError(
             f"Invalid model name '{model_name}'. Supported models: {', '.join(model_list.keys())}"
         )
 
-    model_fn, weights, num_channels = model_list[model_name]
+    # model_fn, weights, num_channels = model_list[model_name]
 
     if "pointnet" in model_name:
         if model_name == "pointnet2_ssg":
             model_fn = PointNet2ClsSSG
-            num_channels = 1024
+            num_channels = num_channels # 1024
         elif model_name == "pointnet2_msg":
             model_fn = PointNet2ClsMSG
-            num_channels = 1280
+            num_channels = num_channels # 1280
             
         base_model = model_fn(
             in_dim=11,  # XYZ + gauss

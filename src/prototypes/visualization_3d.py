@@ -1,11 +1,12 @@
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 def visualize_3d_prototypes(prototypes, dataset, output_dir, prefix="", max_cols=3):
     os.makedirs(output_dir, exist_ok=True)
     
-    for c, proto_list in prototypes.items():
+    for c, proto_list in tqdm(prototypes.items(), desc="Visualizing prototypes"):
         if not proto_list:
             continue
         
