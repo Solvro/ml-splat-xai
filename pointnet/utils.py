@@ -13,7 +13,7 @@ def default(*vals):
             return val
 
 
-def farthest_point_sampling(x: torch.Tensor, n_sample: int, start_idx: int = None):
+def farthest_point_sampling(x: torch.Tensor, n_sample: int, generator: torch.Generator = None, start_idx: int = None):
     # x: (b, n, 3)
     b, n = x.shape[:2]
     assert n_sample <= n, "not enough points to sample"
@@ -25,7 +25,7 @@ def farthest_point_sampling(x: torch.Tensor, n_sample: int, start_idx: int = Non
     if exists(start_idx):
         sel_idx = torch.full((b, n_sample), start_idx, dtype=torch.long, device=x.device)
     else:
-        sel_idx = torch.randint(n, (b, n_sample), dtype=torch.long, device=x.device)
+        sel_idx = torch.randint(n, (b, n_sample), dtype=torch.long, device=x.device, generator=generator)
 
     cur_x = rearrange(x[torch.arange(b), sel_idx[:, 0]], 'b c -> b 1 c')
     min_dists = torch.full((b, n), dtype=x.dtype, device=x.device, fill_value=float('inf'))

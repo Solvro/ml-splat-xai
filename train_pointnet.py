@@ -1,88 +1,12 @@
 import argparse
 from pathlib import Path
-from typing import List, Tuple
-
-import numpy as np
 import torch
 import torch.nn.functional as F
-from plyfile import PlyData
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 
 from pointnet.pointnet2 import PointNet2ClsMSG, PointNet2ClsSSG
-
-FEATURE_NAMES: list[str] = [
-    "x", "y", "z",
-    "scale_0", "scale_1", "scale_2",
-    "rot_0", "rot_1", "rot_2", "rot_3",
-    "opacity",
-]
-
-class GaussianPointCloud(Dataset):
-    def __init__(self, root: Path, num_points: int = 2048):
-        self.root = Path(root)
-        self.num_points = num_points
-
-        self.files: List[Tuple[Path, int]] = []
-        self.classes: List[str] = []
-        class_to_idx = {}
-
-        for class_dir in sorted(self.root.iterdir()):
-            if not class_dir.is_dir():
-                continue
-            class_name = class_dir.name
-            class_to_idx[class_name] = len(class_to_idx)
-            self.classes.append(class_name)
-            for ply_path in class_dir.glob("*.ply"):
-                self.files.append((ply_path, class_to_idx[class_name]))
-
-    @staticmethod
-    def _read_ply(path: Path) -> np.ndarray:
-        plydata = PlyData.read(str(path))
-        vertex = plydata["vertex"]
-        data = np.vstack([vertex[name] for name in FEATURE_NAMES]).T
-        return data.astype(np.float32)
-
-    def _random_sample(self, pts: np.ndarray) -> np.ndarray:
-        N = pts.shape[0]
-        if N >= self.num_points:
-            idx = np.random.choice(N, self.num_points, replace=False)
-        else:
-            idx = np.random.choice(N, self.num_points, replace=True)
-        return pts[idx]
-
-    def __len__(self):
-        return len(self.files)
-
-    def __getitem__(self, idx):
-        path, label = self.files[idx]
-        pts = self._read_ply(path)
-        pts = self._random_sample(pts)
-
-        xyz = pts[:, :3]
-        gauss = pts[:, 3:]
-
-        q = gauss[:, 3:7]
-        q_norm = np.linalg.norm(q, axis=1, keepdims=True) + 1e-8
-        gauss[:, 3:7] = q / q_norm
-
-        xyz = torch.from_numpy(xyz).float()
-        gauss = torch.from_numpy(gauss).float()
-        label = torch.tensor(label, dtype=torch.long)
-
-        return {
-            "xyz": xyz,
-            "gauss": gauss,
-            "label": label,
-        }
-
-
-def collate_fn(batch):
-    xyz = torch.stack([item["xyz"] for item in batch])
-    gauss = torch.stack([item["gauss"] for item in batch])
-    labels = torch.stack([item["label"] for item in batch])
-    return xyz, gauss, labels
-
+from pointnet.dataset import GaussianPointCloud, collate_fn
 
 def train_one_epoch(
         model: PointNet2ClsSSG,

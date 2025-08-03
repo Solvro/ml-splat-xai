@@ -196,3 +196,5 @@ coverage
 
 *.tsbuildinfo
 .vscode
+data/*
+outputs/*

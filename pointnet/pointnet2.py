@@ -6,8 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import repeat, rearrange
 
-from .utils import farthest_point_sampling, ball_query_pytorch
-from .pointnet import STN
+from .utils import farthest_point_sampling, ball_query_pytorch, exists, default
 
 # whether to use taichi for ball query
 TAICHI = False
@@ -18,16 +17,6 @@ def enable_taichi():
     global TAICHI
     TAICHI = True
     ti.init(ti.cuda)
-
-
-def exists(val):
-    return val is not None
-
-
-def default(*vals):
-    for val in vals:
-        if exists(val):
-            return val
 
 
 def _ball_query(src, query, radius, k):
