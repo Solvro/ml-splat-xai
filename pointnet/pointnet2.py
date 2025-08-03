@@ -7,7 +7,6 @@ import torch.nn.functional as F
 from einops import repeat, rearrange
 
 from .utils import farthest_point_sampling, ball_query_pytorch, exists, default
-from .pointnet import STN
 
 # whether to use taichi for ball query
 TAICHI = False
