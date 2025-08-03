@@ -8,7 +8,6 @@ from tqdm import tqdm
 from pointnet.pointnet2 import PointNet2ClsMSG, PointNet2ClsSSG
 from pointnet.dataset import GaussianPointCloud, collate_fn
 
-
 def train_one_epoch(
         model: PointNet2ClsSSG,
         loader: DataLoader,
