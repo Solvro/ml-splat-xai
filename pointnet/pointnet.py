@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from einops import rearrange, repeat
 
 
@@ -8,10 +7,8 @@ def exists(val):
     return val is not None
 
 
-def default(*vals):
-    for val in vals:
-        if exists(val):
-            return val
+def default(val, d):
+    return val if exists(val) else d
 
 
 class STN(nn.Module):
@@ -46,8 +43,8 @@ class STN(nn.Module):
             nn.Linear(256, self.out_nd ** 2),
         )
 
-        nn.init.normal_(self.head[-1].weight, 0, 0.001)
-        nn.init.eye_(self.head[-1].bias.view(self.out_nd, self.out_nd))
+        self.head[-1].weight.data.zero_()
+        self.head[-1].bias.data.copy_(torch.eye(self.out_nd, dtype=torch.float).flatten())
 
     def forward(self, x):
         # x: (b, d, n)
@@ -60,22 +57,54 @@ class STN(nn.Module):
         return x
 
 
+class VoxelAggregation(nn.Module):
+    def __init__(self, grid_size: int = 10):
+        super().__init__()
+        self.grid_size = grid_size
+        self.num_voxels = grid_size ** 3
+
+    def forward(self, features: torch.Tensor, xyz_normalized: torch.Tensor, mask: torch.Tensor | None = None):
+        B, D, N = features.shape
+        G = self.grid_size
+
+        voxel_indices = (xyz_normalized * G).long().clamp(0, G - 1)
+        voxel_indices_flat = voxel_indices[..., 2] * (G * G) + voxel_indices[..., 1] * G + voxel_indices[..., 0]
+
+        if mask is not None:
+            features = features * mask.unsqueeze(1).float()
+
+        voxel_features = torch.zeros(B, D, self.num_voxels, device=features.device, dtype=features.dtype)
+        voxel_indices_flat_expanded = repeat(voxel_indices_flat, "b n -> b d n", d=D)
+        voxel_features.scatter_add_(2, voxel_indices_flat_expanded, features)
+
+        point_counts = torch.zeros(B, self.num_voxels, device=features.device, dtype=torch.long)
+        ones = torch.ones_like(voxel_indices_flat, dtype=torch.long)
+        if mask is not None:
+            ones = ones * mask.long()
+        point_counts.scatter_add_(1, voxel_indices_flat, ones)
+
+        point_counts = point_counts.clamp(min=1).unsqueeze(1)
+        voxel_features_avg = voxel_features / point_counts
+
+        return voxel_features_avg
+
+
 class PointNetCls(nn.Module):
     def __init__(
             self,
             in_dim,
             out_dim,
-            *,
-            stn_3d=STN(in_dim=3),  # if None, no stn_3d
-            with_head=True,
+            grid_size: int = 10,
+            stn_3d=True,
+            stn_nd: bool = True,
             head_norm=True,
             dropout=0.3,
     ):
         super().__init__()
-        self.with_head = with_head
+        self.grid_size = grid_size
 
         # if using stn, put other features behind xyz
-        self.stn_3d = stn_3d
+        self.stn_3d = STN(in_dim=3) if stn_3d else nn.Identity()
 
         self.conv1 = nn.Sequential(
             nn.Conv1d(in_dim, 64, 1, bias=False),
@@ -86,7 +115,7 @@ class PointNetCls(nn.Module):
             nn.GELU(),
         )
 
-        self.stn_nd = STN(in_dim=64, head_norm=head_norm)
+        self.stn_nd = STN(in_dim=64, head_norm=head_norm) if stn_nd else nn.Identity()
         self.conv2 = nn.Sequential(
             nn.Conv1d(64, 64, 1, bias=False),
             nn.BatchNorm1d(64),
@@ -95,103 +124,53 @@ class PointNetCls(nn.Module):
             nn.BatchNorm1d(128),
             nn.GELU(),
             nn.Conv1d(128, 1024, 1, bias=False),
+            nn.BatchNorm1d(1024),
         )
+
+        self.voxel_agg = VoxelAggregation(grid_size)
 
         norm = nn.BatchNorm1d if head_norm else nn.Identity
-        self.norm = norm(1024)
-        self.act = nn.GELU()
-
-        if self.with_head:
-            self.head = nn.Sequential(
-                nn.Linear(1024, 512, bias=False),
-                norm(512),
-                nn.GELU(),
-                nn.Linear(512, 256, bias=False),
-                norm(256),
-                nn.GELU(),
-                nn.Dropout(dropout),
-                nn.Linear(256, out_dim),
-            )
-
-    def forward(self, x):
-        # x: (b, d, n)
-        if exists(self.stn_3d):
-            transform_3d = self.stn_3d(x)
-            if x.size(1) == 3:
-                x = torch.bmm(transform_3d, x)
-            elif x.size(1) > 3:
-                x = torch.cat([torch.bmm(transform_3d, x[:, :3]), x[:, 3:]], dim=1)
-            else:
-                raise ValueError(f"invalid input dimension: {x.size(1)}")
-
-        x = self.conv1(x)
-        transform_nd = self.stn_nd(x)
-        x = torch.bmm(transform_nd, x)
-        x = self.conv2(x)
-
-        x = torch.max(x, dim=-1, keepdim=False)[0]
-        x = self.act(self.norm(x))
-
-        if self.with_head:
-            x = self.head(x)
-        return x
-
-
-class PointNetSeg(nn.Module):
-
-    def __init__(
-            self,
-            in_dim,
-            out_dim,
-            *,
-            stn_3d=STN(in_dim=3),  # if None, no stn_3d
-            global_head_norm=True,  # if using normalization in the global head, disable it if batch size is 1
-    ):
-        super().__init__()
-
-        self.backbone = PointNetCls(in_dim=in_dim,
-                                    out_dim=out_dim,
-                                    stn_3d=stn_3d,
-                                    head_norm=global_head_norm,
-                                    with_head=False)
-
         self.head = nn.Sequential(
-            nn.Conv1d(1024 + 64, 512, 1, bias=False),
-            nn.BatchNorm1d(512),
+            norm(1024),
             nn.GELU(),
-            nn.Conv1d(512, 256, 1, bias=False),
-            nn.BatchNorm1d(256),
+            nn.Linear(1024, 512, bias=False),
+            norm(512),
             nn.GELU(),
-            nn.Conv1d(256, 128, 1, bias=False),
-            nn.BatchNorm1d(128),
+            nn.Linear(512, 256, bias=False),
+            norm(256),
             nn.GELU(),
-            nn.Conv1d(128, out_dim, 1),
+            nn.Dropout(dropout),
+            nn.Linear(256, out_dim),
         )
 
-    def forward_backbone(self, x):
-        # x: (b, d, n)
-        if exists(self.backbone.stn_3d):
-            transform_3d = self.backbone.stn_3d(x)
-            if x.size(1) == 3:
-                x = torch.bmm(transform_3d, x)
-            elif x.size(1) > 3:
-                x = torch.cat([torch.bmm(transform_3d, x[:, :3]), x[:, 3:]], dim=1)
-            else:
-                raise ValueError(f"invalid input dimension: {x.size(1)}")
+    def forward(self, features: torch.Tensor, xyz_normalized: torch.Tensor, mask: torch.Tensor | None = None):
+        # features (B, D, N)
+        # xyz_normalized (B, N, 3)
+        # mask (B, N).
 
-        x = self.backbone.conv1(x)
-        transform_nd = self.backbone.stn_nd(x)
-        x = torch.bmm(transform_nd, x)
+        xyz_features = features[:, :3, :]
 
-        global_feat = self.backbone.conv2(x)
-        global_feat = torch.max(global_feat, dim=-1, keepdim=False)[0]
-        global_feat = self.backbone.act(self.backbone.norm(global_feat))
-        return x, global_feat
+        transform_3d = self.stn_3d(xyz_features)
+        if isinstance(self.stn_3d, STN):
+            transformed_features = torch.bmm(transform_3d, xyz_features)
+            features = torch.cat([transformed_features, features[:, 3:, :]], dim=1)
 
-    def forward(self, x):
-        # x: (b, d, n)
-        x, global_feat = self.forward_backbone(x)
-        global_feat = repeat(global_feat, "b d -> b d n", n=x.size(-1))
-        x = torch.cat([x, global_feat], dim=1)
-        x = self.head(x)
-        return x
+        x = self.conv1(features)
+
+        transform_nd = self.stn_nd(x)
+        if isinstance(self.stn_nd, STN):
+            x = torch.bmm(transform_nd, x)
+
+        point_features = self.conv2(x) # Shape: (B, 1024, N)
+
+        voxel_features = self.voxel_agg(point_features, xyz_normalized, mask) # (B, 1024, G^3)
+
+        global_feature, _ = torch.max(voxel_features, dim=-1) # (B, 1024)
+        
+        logits = self.head(global_feature) # (B, out_dim)
+
+        if self.training:
+            return logits
+        else:
+            voxel_activations, _ = torch.max(voxel_features, dim=1) # (B, G^3)
+            return logits, voxel_activations

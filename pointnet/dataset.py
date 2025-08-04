@@ -61,51 +61,81 @@ class GaussianPointCloud(Dataset):
         else:
             idx = np.random.choice(N, self.num_points, replace=True) if self.rng is None else self.rng.choice(N, self.num_points, replace=True)
         return pts[idx]
-    
+
     def _sample(self, pts: np.ndarray) -> np.ndarray:
         if self.sampling_method == "random":
             return self._random_sample(pts)
         elif self.sampling_method == "fps":
-            pts_tensor = torch.from_numpy(pts).float().unsqueeze(0)
-            idx = farthest_point_sampling(pts_tensor, self.num_points, self.pt_generator).squeeze(0)
-            return pts[idx.numpy()]
-        elif self.sampling_method == "original_size": # only works when batch size is 1 (for debugging purposes)
-            if pts.shape[0] >= self.num_points:
-                return pts
-            else:
-                raise ValueError("Original size sampling requires at least num_points points in the point cloud.")
+            pts_tensor = torch.from_numpy(pts[:, :3]).float().unsqueeze(0)
+            indices = farthest_point_sampling(pts_tensor, self.num_points, self.pt_generator).squeeze(0)
+            return pts[indices.numpy()]
+        elif self.sampling_method == "original_size":
+            return pts
         else:
             raise ValueError(f"Unknown sampling method: {self.sampling_method}")
-
 
     def __len__(self):
         return len(self.files)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         path, label = self.files[idx]
         pts = self._read_ply(path)
-        pts = self._sample(pts)
+        
+        if self.sampling_method != "original_size":
+            pts = self._sample(pts)
+
+        q = pts[:, 7:11]
+        q_norm = np.linalg.norm(q, axis=1, keepdims=True)
+        q_norm[q_norm == 0] = 1.0
+        pts[:, 7:11] = q / q_norm
 
         xyz = pts[:, :3]
-        gauss = pts[:, 3:]
+        xyz_min = xyz.min(axis=0)
+        xyz_max = xyz.max(axis=0)
+        xyz_normalized = (xyz - xyz_min) / (xyz_max - xyz_min + 1e-8)
 
-        q = gauss[:, 3:7]
-        q_norm = np.linalg.norm(q, axis=1, keepdims=True) + 1e-8
-        gauss[:, 3:7] = q / q_norm
-
-        xyz = torch.from_numpy(xyz).float()
-        gauss = torch.from_numpy(gauss).float()
-        label = torch.tensor(label, dtype=torch.long)
-
+        gauss = torch.from_numpy(pts).float()
+        
         return {
-            "xyz": xyz,
             "gauss": gauss,
-            "label": label,
+            "xyz_normalized": torch.from_numpy(xyz_normalized).float(),
+            "label": torch.tensor(label, dtype=torch.long),
         }
 
 
 def collate_fn(batch):
-    xyz = torch.stack([item["xyz"] for item in batch])
-    gauss = torch.stack([item["gauss"] for item in batch])
-    labels = torch.stack([item["label"] for item in batch])
-    return xyz, gauss, labels
+    max_points = max(item["gauss"].shape[0] for item in batch)
+
+    padded_features = []
+    padded_xyz_normalized = []
+    labels = []
+    masks = []
+
+    for item in batch:
+        features = item["gauss"]
+        xyz_normalized = item["xyz_normalized"]
+        num_points = features.shape[0]
+        
+        mask = torch.zeros(max_points, dtype=torch.bool)
+        mask[:num_points] = True
+        masks.append(mask)
+
+        padding_size = max_points - num_points
+        
+        if padding_size > 0:
+            feature_padding = torch.zeros((padding_size, features.shape[1]), dtype=features.dtype)
+            features = torch.cat([features, feature_padding], dim=0)
+            
+            xyz_padding = torch.zeros((padding_size, 3), dtype=xyz_normalized.dtype)
+            xyz_normalized = torch.cat([xyz_normalized, xyz_padding], dim=0)
+
+        padded_features.append(features)
+        padded_xyz_normalized.append(xyz_normalized)
+        labels.append(item["label"])
+
+    return {
+        "gauss": torch.stack(padded_features).transpose(1, 2), # (B, D, N)
+        "xyz_normalized": torch.stack(padded_xyz_normalized), # (B, N, 3)
+        "label": torch.stack(labels),
+        "mask": torch.stack(masks) # (B, N)
+    }
