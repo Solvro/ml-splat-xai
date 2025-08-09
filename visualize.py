@@ -84,7 +84,7 @@ def visualize_prototypes(
     top_activations, top_indices_flat = torch.topk(voxel_activations, k=top_k)
     top_indices_flat = top_indices_flat.cpu().numpy()
 
-    print(f"File: {ply_path.name}, Predicted class index: {pred_class_idx}")
+    print(f"File: {ply_path.name}, Predicted class index: {pred_class_idx} | True class index: {ply_path.parent.name}")
 
     G = model.grid_size
     voxel_indices = (xyz_normalized.squeeze(0) * G).long().clamp(0, G - 1)
@@ -96,6 +96,9 @@ def visualize_prototypes(
 
     fig_isolated, axes_isolated = plt.subplots(1, top_k, figsize=(18, 6), subplot_kw={"projection": "3d"})
     fig_isolated.suptitle(f"Top {top_k} Isolated Prototypes for {ply_path.name}", fontsize=16)
+
+    fig_activations, axis_activations = plt.subplots(1, 1, figsize=(10, 6))
+    fig_activations.suptitle(f"Voxel activations for {ply_path.name}", fontsize=16)
 
 
     for i in range(top_k):
@@ -126,6 +129,17 @@ def visualize_prototypes(
             ax.set_ylabel("Y")
             ax.set_zlabel("Z")
             ax.view_init(elev=30, azim=45)
+
+    axis_activations.bar(range(len(voxel_activations)), voxel_activations.cpu().numpy(), color='blue', alpha=0.7)
+    axis_activations.set_title("Voxel Activations")
+    axis_activations.set_xlabel("Voxel Index")
+    axis_activations.set_ylabel("Activation Value")
+    axis_activations.set_xticks(range(0, G**3, G**2))
+    axis_activations.set_xticklabels([f"{i}" for i in range(0, G**3, G**2)])
+    axis_activations.grid(True)
+    path_activations = f"{output_prefix}_activations.png"
+    fig_activations.tight_layout(rect=[0, 0.03, 1, 0.95])
+    fig_activations.savefig(path_activations)
 
     path_context = f"{output_prefix}_context.png"
     fig_context.tight_layout(rect=[0, 0.03, 1, 0.95])

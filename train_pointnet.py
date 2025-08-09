@@ -58,17 +58,17 @@ def eval_one_epoch(
 
 def main():
     parser = argparse.ArgumentParser(description="Train Interpretable PointNet on Gaussian Point Clouds")
-    parser.add_argument("--data_dir", type=str, default="data", help="Root directory with class subfolders")
-    parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--data_dir", type=str, default="test_data/train", help="Root directory with class subfolders")
+    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--val_split", type=float, default=0.1)
     parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--sampling", type=str, default="fps", choices=["fps", "random", "original_size"], help="Point sampling method")
-    parser.add_argument("--num_points", type=int, default=4096, help="Number of points if sampling is used")
+    parser.add_argument("--num_points", type=int, default=512, help="Number of points if sampling is used")
     parser.add_argument("--grid_size", type=int, default=10, help="Size of the voxel grid for aggregation")
-    parser.add_argument("--model_save_path", type=str, default="best_model_interpret11131.pt")
+    parser.add_argument("--model_save_path", type=str, default="best_model_interpret43535.pt")
     parser.add_argument("--use_stn", action="store_true", help="Use STN layers")
     args = parser.parse_args()
 
@@ -93,6 +93,9 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.7)
 
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total trainable parameters: {total_params}")
+
     best_acc = 0.0
     for epoch in range(1, args.epochs + 1):
         train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, args.device)
@@ -113,4 +116,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

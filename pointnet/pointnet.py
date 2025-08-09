@@ -128,12 +128,15 @@ class PointNetCls(nn.Module):
         )
 
         self.voxel_agg = VoxelAggregation(grid_size)
+        self.conv3 = nn.Conv1d(in_channels=1024, out_channels=1, kernel_size=1, padding='same', bias=False)
 
         norm = nn.BatchNorm1d if head_norm else nn.Identity
+        
+        head_size = self.grid_size ** 3
         self.head = nn.Sequential(
-            norm(1024),
+            norm(head_size),
             nn.GELU(),
-            nn.Linear(1024, 512, bias=False),
+            nn.Linear(head_size, 512, bias=False),
             norm(512),
             nn.GELU(),
             nn.Linear(512, 256, bias=False),
@@ -164,9 +167,10 @@ class PointNetCls(nn.Module):
         point_features = self.conv2(x) # Shape: (B, 1024, N)
 
         voxel_features = self.voxel_agg(point_features, xyz_normalized, mask) # (B, 1024, G^3)
-
-        global_feature, _ = torch.max(voxel_features, dim=-1) # (B, 1024)
         
+        global_feature = self.conv3(voxel_features)  # (B, 1, G^3)
+        global_feature = global_feature.squeeze(1) # (B, G^3)
+
         logits = self.head(global_feature) # (B, out_dim)
 
         if self.training:
