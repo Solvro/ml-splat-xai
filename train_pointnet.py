@@ -1,6 +1,7 @@
 import argparse
 from pathlib import Path
 from matplotlib import pyplot as plt
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
@@ -59,8 +60,8 @@ def eval_one_epoch(
 
 def main():
     parser = argparse.ArgumentParser(description="Train Interpretable PointNet on Gaussian Point Clouds")
-    parser.add_argument("--data_dir", type=str, default="data", help="Root directory with class subfolders")
-    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--data_dir", type=str, default="data-train", help="Root directory with class subfolders")
+    parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=12)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--val_split", type=float, default=0.1)
@@ -69,7 +70,7 @@ def main():
     parser.add_argument("--sampling", type=str, default="fps", choices=["fps", "random", "original_size"], help="Point sampling method")
     parser.add_argument("--num_points", type=int, default=1024, help="Number of points if sampling is used")
     parser.add_argument("--grid_size", type=int, default=10, help="Size of the voxel grid for aggregation")
-    parser.add_argument("--model_save_path", type=str, default="best_model_interpret32434.pt")
+    parser.add_argument("--model_save_path", type=str, default="best_model_interpret_stn_nd_23424.pt")
     parser.add_argument("--use_stn", action="store_true", help="Use STN layers")
     args = parser.parse_args()
 
@@ -88,8 +89,8 @@ def main():
         in_dim=in_dim, 
         out_dim=num_classes, 
         grid_size=args.grid_size,
-        stn_3d=args.use_stn,
-        stn_nd=args.use_stn,
+        stn_3d=False,
+        stn_nd=True,
     ).to(args.device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.7)
@@ -120,27 +121,30 @@ def main():
                 "acc": best_acc,
                 "config": vars(args)
             }, args.model_save_path)
+        
+        if epoch % 5 == 1:
+            fig, axes = plt.subplots(2, 1, figsize=(12, 10))
+            ax1, ax2 = axes
+
+            ax1.plot(np.arange(len(train_losses)), train_losses, label="Train Loss")
+            ax1.plot(np.arange(len(val_losses)), val_losses, label="Validation Loss")
+            ax1.set_title("Loss per Epoch")
+            ax1.set_xlabel("Epoch")
+            ax1.set_ylabel("Loss")
+            ax1.legend()
+
+            ax2.plot(np.arange(len(train_accs)), train_accs, label="Train Acc")
+            ax2.plot(np.arange(len(val_accs)), val_accs, label="Validation Acc")
+            ax2.set_title("Acc per Epoch")
+            ax2.set_xlabel("Epoch")
+            ax2.set_ylabel("Acc")
+            ax2.legend()
+
+            fig.savefig(f"training_progress_{args.model_save_path[:-3]}_epoch{epoch}.png")
 
     print(f"Training complete. Best validation accuracy: {best_acc:.4f}")
 
-    fig, axes = plt.subplots(2, 1, figsize=(12, 10))
-    ax1, ax2 = axes
 
-    ax1.plot(train_losses, label="Train Loss")
-    ax1.plot(val_losses, label="Validation Loss")
-    ax1.set_title("Loss per Epoch")
-    ax1.set_xlabel("Epoch")
-    ax1.set_ylabel("Loss")
-    ax1.legend()
-
-    ax2.plot(train_acc, label="Train Acc")
-    ax2.plot(val_acc, label="Validation Acc")
-    ax2.set_title("Acc per Epoch")
-    ax2.set_xlabel("Epoch")
-    ax2.set_ylabel("Acc")
-    ax2.legend()
-
-    fig.savefig(f"training_progress_{args.model_save_path[:-3]}.png")
 
 if __name__ == "__main__":
     main()

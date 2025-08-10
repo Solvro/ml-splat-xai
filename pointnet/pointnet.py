@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 from einops import rearrange, repeat
+import pytorch_lightning as pl
+import torchmetrics
 
 
 def exists(val):
@@ -14,7 +16,7 @@ def default(val, d):
 class STN(nn.Module):
     # perform spatial transformation in n-dimensional space
 
-    def __init__(self, in_dim=3, out_nd=None, head_norm=True):
+    def __init__(self, in_dim=3, expand_dim=1024, out_nd=None, head_norm=True):
         super().__init__()
         self.in_dim = in_dim
         self.out_nd = default(out_nd, in_dim)
@@ -26,18 +28,15 @@ class STN(nn.Module):
             nn.Conv1d(64, 128, 1, bias=False),
             nn.BatchNorm1d(128),
             nn.GELU(),
-            nn.Conv1d(128, 1024, 1, bias=False),
+            nn.Conv1d(128, expand_dim, 1, bias=False),
         )
 
         norm = nn.BatchNorm1d if head_norm else nn.Identity
-        self.norm = norm(1024)
+        self.norm = norm(expand_dim)
         self.act = nn.GELU()
 
         self.head = nn.Sequential(
-            nn.Linear(1024, 512, bias=False),
-            norm(512),
-            nn.GELU(),
-            nn.Linear(512, 256, bias=False),
+            nn.Linear(expand_dim, 256, bias=False),
             norm(256),
             nn.GELU(),
             nn.Linear(256, self.out_nd ** 2),
@@ -115,7 +114,7 @@ class PointNetCls(nn.Module):
             nn.GELU(),
         )
 
-        self.stn_nd = STN(in_dim=64, head_norm=head_norm) if stn_nd else nn.Identity()
+        self.stn_nd = STN(in_dim=64, expand_dim=256, head_norm=head_norm) if stn_nd else nn.Identity()
         self.conv2 = nn.Sequential(
             nn.Conv1d(64, 64, 1, bias=False),
             nn.BatchNorm1d(64),
@@ -178,3 +177,47 @@ class PointNetCls(nn.Module):
         else:
             voxel_activations, _ = torch.max(voxel_features, dim=1) # (B, G^3)
             return logits, voxel_activations
+
+
+class PointNetLightning(pl.LightningModule):
+    def __init__(self, in_dim, num_classes, grid_size=10, stn_3d=False, stn_nd=True, lr=1e-3, weight_decay=1e-4):
+        super().__init__()
+        self.save_hyperparameters()
+        self.model = PointNetCls(
+            in_dim=in_dim,
+            out_dim=num_classes,
+            grid_size=grid_size,
+            stn_3d=stn_3d,
+            stn_nd=stn_nd,
+        )
+        self.train_acc = torchmetrics.Accuracy(task="multiclass", num_classes=num_classes)
+        self.val_acc = torchmetrics.Accuracy(task="multiclass", num_classes=num_classes)
+
+    def forward(self, features, xyz_normalized, mask=None):
+        return self.model(features, xyz_normalized, mask)
+
+    def training_step(self, batch, batch_idx):
+        features, xyz_normalized, labels, mask = batch["gauss"], batch["xyz_normalized"], batch["label"], batch["mask"]
+        logits = self.model(features, xyz_normalized, mask)
+        loss = F.cross_entropy(logits, labels)
+        self.train_acc(logits, labels)
+        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        self.log("train_acc", self.train_acc, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        features, xyz_normalized, labels, mask = batch["gauss"], batch["xyz_normalized"], batch["label"], batch["mask"]
+        logits, _ = self.model(features, xyz_normalized, mask)
+        loss = F.cross_entropy(logits, labels)
+        self.val_acc(logits, labels)
+        self.log("val_loss", loss, on_epoch=True, prog_bar=True, logger=True)
+        self.log("val_acc", self.val_acc, on_epoch=True, prog_bar=True, logger=True)
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(
+            self.parameters(),
+            lr=self.hparams.lr,
+            weight_decay=self.hparams.weight_decay
+        )
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.7)
+        return [optimizer], [scheduler]

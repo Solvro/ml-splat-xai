@@ -67,7 +67,14 @@ class GaussianPointCloud(Dataset):
             return self._random_sample(pts)
         elif self.sampling_method == "fps":
             pts_tensor = torch.from_numpy(pts[:, :3]).float().unsqueeze(0)
+            start_time = torch.cuda.Event(enable_timing=True)
+            end_time = torch.cuda.Event(enable_timing=True)
+            start_time.record()
             indices = farthest_point_sampling(pts_tensor, self.num_points, self.pt_generator).squeeze(0)
+            end_time.record()
+            torch.cuda.synchronize()
+            elapsed_time = start_time.elapsed_time(end_time)
+            print(f"Farthest Point Sampling took {elapsed_time:.2f} ms")
             return pts[indices.numpy()]
         elif self.sampling_method == "original_size":
             return pts
