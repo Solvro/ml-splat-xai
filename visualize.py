@@ -8,6 +8,7 @@ from plyfile import PlyData
 
 from pointnet.pointnet import PointNetCls
 from pointnet.dataset import GaussianPointCloud, FEATURE_NAMES
+from pointnet.pointnet import PointNetLightning
 
 def flat_to_3d_index(idx_flat: int, grid_size: int) -> list[int]:
     z = idx_flat // (grid_size * grid_size)
@@ -78,17 +79,18 @@ def visualize_prototypes(
     xyz_min, xyz_max = data["xyz_min"], data["xyz_max"]
 
     with torch.no_grad():
-        logits, voxel_activations = model(features, xyz_normalized)
+        logits, voxel_activations, point_counts = model(features, xyz_normalized)
     
     pred_class_idx = logits.argmax(dim=1).item()
     voxel_activations = voxel_activations.squeeze(0)
+    point_counts = point_counts.squeeze(0)
 
     top_activations, top_indices_flat = torch.topk(voxel_activations, k=top_k)
     top_indices_flat = top_indices_flat.cpu().numpy()
 
     print(f"File: {ply_path}, Predicted class index: {pred_class_idx} | True class index: {ply_path.parent.name}")
 
-    G = model.grid_size
+    G = model.hparams.grid_size
     voxel_indices = (xyz_normalized.squeeze(0) * G).long().clamp(0, G - 1)
     voxel_indices_flat = voxel_indices[..., 2] * (G * G) + voxel_indices[..., 1] * G + voxel_indices[..., 0]
     voxel_indices_flat = voxel_indices_flat.cpu().numpy()
@@ -99,8 +101,17 @@ def visualize_prototypes(
     fig_isolated, axes_isolated = plt.subplots(1, top_k, figsize=(18, 6), subplot_kw={"projection": "3d"})
     fig_isolated.suptitle(f"Top {top_k} Isolated Prototypes for {ply_path}", fontsize=16)
 
-    fig_activations, axis_activations = plt.subplots(1, 1, figsize=(10, 6))
-    fig_activations.suptitle(f"Voxel activations for {ply_path}", fontsize=16)
+    r2 = np.corrcoef(voxel_activations.cpu().numpy(), point_counts.cpu().numpy())
+    r2_coeff = r2[0, 1]
+    fig_activations, [axis_activations, axis_point_counts] = plt.subplots(1, 2, figsize=(18, 8))
+    fig_activations.suptitle(f"Voxel activations for {ply_path} | corr = {np.round(r2_coeff, 2)}", fontsize=16)
+
+    fig_scatter, axis_scatter = plt.subplots(figsize=(8, 8))
+    axis_scatter.scatter(voxel_activations.cpu().numpy(), point_counts.cpu().numpy(), alpha=0.5)
+    axis_scatter.set_title(f"Voxel Activations vs Point Counts for {ply_path}")
+    axis_scatter.set_xlabel("Voxel Activations")
+    axis_scatter.set_ylabel("Point Counts")
+    axis_scatter.grid(True)
 
 
     for i in range(top_k):
@@ -140,11 +151,23 @@ def visualize_prototypes(
     axis_activations.set_xticklabels([f"{i}" for i in range(0, G**3, G**2)])
     axis_activations.grid(True)
 
+    axis_point_counts.bar(range(len(point_counts)), point_counts.cpu().numpy(), color='darkorange', alpha=0.7)
+    axis_point_counts.set_title("Voxel point counts")
+    axis_point_counts.set_xlabel("Voxel Index")
+    axis_point_counts.set_ylabel("Points count")
+    axis_point_counts.set_xticks(range(0, G**3, G**2))
+    axis_point_counts.set_xticklabels([f"{i}" for i in range(0, G**3, G**2)])
+    axis_point_counts.grid(True)
+
     ply_name = ply_path.stem
 
-    path_activations = f"{ply_name}_activations.png"
+    path_activations_counts = f"{ply_name}_activations_counts.png"
     fig_activations.tight_layout(rect=[0, 0.03, 1, 0.95])
-    fig_activations.savefig(output_folder / path_activations if output_folder is not None else path_activations)
+    fig_activations.savefig(output_folder / path_activations_counts if output_folder is not None else path_activations)
+
+    path_scatter = f"{ply_name}_scatter.png"
+    fig_scatter.tight_layout(rect=[0, 0.03, 1, 0.95])
+    fig_scatter.savefig(output_folder / path_scatter if output_folder is not None else path_scatter)
 
     path_context = f"{ply_name}_context.png"
     fig_context.tight_layout(rect=[0, 0.03, 1, 0.95])
@@ -162,29 +185,15 @@ def main():
     parser.add_argument("--data_folder", type=str, required=True, help="Path to the folder with PLY files")
     parser.add_argument("--model_path", type=str, required=True, help="Path to the trained model")
     parser.add_argument("--top_k", type=int, default=3, help="Number of top prototypes to visualize.")
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--device", type=str, default="cpu") # "cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--output_prefix", type=str, default="prototype_visualization", help="Prefix for the output PNG files.")
     args = parser.parse_args()
-
-    checkpoint = torch.load(args.model_path, map_location=args.device)
-    config = checkpoint["config"]
     
-    data_folder = Path(args.data_folder)
-    dataset = GaussianPointCloud(data_folder, sampling_method="none")
-    num_classes = len(dataset.classes)
-    in_dim = len(FEATURE_NAMES)
-
-    use_stn_from_config = config.get("use_stn", False)
-
-    model = PointNetCls(
-        in_dim=in_dim,
-        out_dim=num_classes,
-        grid_size=config["grid_size"],
-        stn_3d=False, # use_stn_from_config,
-        stn_nd=True, # use_stn_from_config
+    data_folder = Path(args.data_folder)    
+    model = PointNetLightning.load_from_checkpoint(
+        args.model_path, map_location=args.device
     )
-    
-    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
 
     output_prefix = args.output_prefix.removesuffix(".png")
 

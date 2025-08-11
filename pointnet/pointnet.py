@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange, repeat
 import pytorch_lightning as pl
 import torchmetrics
@@ -22,10 +23,7 @@ class STN(nn.Module):
         self.out_nd = default(out_nd, in_dim)
 
         self.net = nn.Sequential(
-            nn.Conv1d(in_dim, 64, 1, bias=False),
-            nn.BatchNorm1d(64),
-            nn.GELU(),
-            nn.Conv1d(64, 128, 1, bias=False),
+            nn.Conv1d(in_dim, 128, 1, bias=False),
             nn.BatchNorm1d(128),
             nn.GELU(),
             nn.Conv1d(128, expand_dim, 1, bias=False),
@@ -82,10 +80,10 @@ class VoxelAggregation(nn.Module):
             ones = ones * mask.long()
         point_counts.scatter_add_(1, voxel_indices_flat, ones)
 
-        point_counts = point_counts.clamp(min=1).unsqueeze(1)
-        voxel_features_avg = voxel_features / point_counts
+        point_counts_ = point_counts.clamp(min=1).unsqueeze(1)
+        voxel_features_avg = voxel_features / point_counts_
 
-        return voxel_features_avg
+        return voxel_features_avg, point_counts
 
 
 class PointNetCls(nn.Module):
@@ -114,7 +112,7 @@ class PointNetCls(nn.Module):
             nn.GELU(),
         )
 
-        self.stn_nd = STN(in_dim=64, expand_dim=256, head_norm=head_norm) if stn_nd else nn.Identity()
+        self.stn_nd = STN(in_dim=64, expand_dim=512, head_norm=head_norm) if stn_nd else nn.Identity()
         self.conv2 = nn.Sequential(
             nn.Conv1d(64, 64, 1, bias=False),
             nn.BatchNorm1d(64),
@@ -165,7 +163,7 @@ class PointNetCls(nn.Module):
 
         point_features = self.conv2(x) # Shape: (B, 1024, N)
 
-        voxel_features = self.voxel_agg(point_features, xyz_normalized, mask) # (B, 1024, G^3)
+        voxel_features, point_counts = self.voxel_agg(point_features, xyz_normalized, mask) # (B, 1024, G^3)
         
         global_feature = self.conv3(voxel_features)  # (B, 1, G^3)
         global_feature = global_feature.squeeze(1) # (B, G^3)
@@ -176,7 +174,7 @@ class PointNetCls(nn.Module):
             return logits
         else:
             voxel_activations, _ = torch.max(voxel_features, dim=1) # (B, G^3)
-            return logits, voxel_activations
+            return logits, voxel_activations, point_counts
 
 
 class PointNetLightning(pl.LightningModule):
@@ -207,7 +205,10 @@ class PointNetLightning(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         features, xyz_normalized, labels, mask = batch["gauss"], batch["xyz_normalized"], batch["label"], batch["mask"]
-        logits, _ = self.model(features, xyz_normalized, mask)
+        logits, voxel_activations, point_counts = self.model(features, xyz_normalized, mask)
+        with torch.no_grad():
+            r2_coeff = torch.corrcoef(torch.cat([torch.reshape(voxel_activations, (1, -1)), torch.reshape(point_counts, (1, -1))]))
+            self.log("r2_coeff", r2_coeff[0, 1], on_epoch=True, prog_bar=True, logger=True)
         loss = F.cross_entropy(logits, labels)
         self.val_acc(logits, labels)
         self.log("val_loss", loss, on_epoch=True, prog_bar=True, logger=True)

@@ -1,13 +1,13 @@
 from pathlib import Path
-from typing import List, Tuple
 
 import numpy as np
 from numpy.random import default_rng
 import torch
 from plyfile import PlyData
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader, random_split
 from pointnet.pointnet2 import exists
 from pointnet.utils import farthest_point_sampling
+import pytorch_lightning as pl
 
 
 FEATURE_NAMES: list[str] = [
@@ -34,8 +34,8 @@ class GaussianPointCloud(Dataset):
         if exists(random_seed):
             self.pt_generator.manual_seed(self.random_seed)
 
-        self.files: List[Tuple[Path, int]] = []
-        self.classes: List[str] = []
+        self.files: list[tuple[Path, int]] = []
+        self.classes: list[str] = []
         class_to_idx = {}
 
         for class_dir in sorted(self.root.iterdir()):
@@ -67,14 +67,7 @@ class GaussianPointCloud(Dataset):
             return self._random_sample(pts)
         elif self.sampling_method == "fps":
             pts_tensor = torch.from_numpy(pts[:, :3]).float().unsqueeze(0)
-            start_time = torch.cuda.Event(enable_timing=True)
-            end_time = torch.cuda.Event(enable_timing=True)
-            start_time.record()
             indices = farthest_point_sampling(pts_tensor, self.num_points, self.pt_generator).squeeze(0)
-            end_time.record()
-            torch.cuda.synchronize()
-            elapsed_time = start_time.elapsed_time(end_time)
-            print(f"Farthest Point Sampling took {elapsed_time:.2f} ms")
             return pts[indices.numpy()]
         elif self.sampling_method == "original_size":
             return pts
@@ -146,3 +139,54 @@ def collate_fn(batch):
         "label": torch.stack(labels),
         "mask": torch.stack(masks) # (B, N)
     }
+
+
+class GaussianDataModule(pl.LightningDataModule):
+    def __init__(self,
+             data_dir: str,
+             batch_size: int = 32,
+             num_workers: int = 4,
+             val_split: float = 0.1,
+             sampling: str = "fps",
+             num_points: int = 4096,
+             seed: int = 42) -> None:
+        super().__init__()
+        self.save_hyperparameters()
+        self.train_ds, self.val_ds = None, None
+        self.num_classes, self.in_dim = 0, len(FEATURE_NAMES)
+
+    def setup(self, stage: str | None = None):
+        dataset = GaussianPointCloud(
+            Path(self.hparams.data_dir),
+            num_points=self.hparams.num_points,
+            sampling_method=self.hparams.sampling,
+            random_seed=self.hparams.seed
+        )
+        self.num_classes = len(dataset.classes)
+        n_val = int(len(dataset) * self.hparams.val_split)
+        n_train = len(dataset) - n_val
+        self.train_ds, self.val_ds = random_split(
+            dataset,
+            [n_train, n_val],
+            generator=torch.Generator().manual_seed(self.hparams.seed)
+        )
+
+    def train_dataloader(self):
+        return DataLoader(
+            self.train_ds,
+            batch_size=self.hparams.batch_size,
+            shuffle=True,
+            num_workers=self.hparams.num_workers,
+            collate_fn=collate_fn,
+            drop_last=True,
+            persistent_workers=True
+        )
+
+    def val_dataloader(self):
+        return DataLoader(
+            self.val_ds,
+            batch_size=self.hparams.batch_size,
+            num_workers=self.hparams.num_workers,
+            collate_fn=collate_fn,
+            persistent_workers=True
+        )
