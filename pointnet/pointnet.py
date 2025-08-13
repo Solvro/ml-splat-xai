@@ -23,7 +23,10 @@ class STN(nn.Module):
         self.out_nd = default(out_nd, in_dim)
 
         self.net = nn.Sequential(
-            nn.Conv1d(in_dim, 128, 1, bias=False),
+            nn.Conv1d(in_dim, 64, 1, bias=False),
+            nn.BatchNorm1d(64),
+            nn.GELU(),
+            nn.Conv1d(64, 128, 1, bias=False),
             nn.BatchNorm1d(128),
             nn.GELU(),
             nn.Conv1d(128, expand_dim, 1, bias=False),
@@ -34,12 +37,14 @@ class STN(nn.Module):
         self.act = nn.GELU()
 
         self.head = nn.Sequential(
-            nn.Linear(expand_dim, 256, bias=False),
+            nn.Linear(expand_dim, 512, bias=False),
+            norm(512),
+            nn.GELU(),
+            nn.Linear(512, 256, bias=False),
             norm(256),
             nn.GELU(),
             nn.Linear(256, self.out_nd ** 2),
         )
-
         self.head[-1].weight.data.zero_()
         self.head[-1].bias.data.copy_(torch.eye(self.out_nd, dtype=torch.float).flatten())
 
@@ -148,13 +153,15 @@ class PointNetCls(nn.Module):
         # xyz_normalized (B, N, 3)
         # mask (B, N).
 
-        xyz_features = features[:, :3, :]
+        xyz_features = xyz_normalized.permute(0, 2, 1)
+        features[:, :3, :] = xyz_features # normalized xyz
 
         transform_3d = self.stn_3d(xyz_features)
         if isinstance(self.stn_3d, STN):
             transformed_features = torch.bmm(transform_3d, xyz_features)
             features = torch.cat([transformed_features, features[:, 3:, :]], dim=1)
 
+        # USE NORMALIZED XYZ OR NOT??
         x = self.conv1(features)
 
         transform_nd = self.stn_nd(x)
