@@ -8,6 +8,7 @@ from torch.utils.data import Dataset, DataLoader, random_split
 from pointnet.pointnet2 import exists
 from pointnet.utils import farthest_point_sampling
 import pytorch_lightning as pl
+from sklearn.preprocessing import normalize
 
 
 FEATURE_NAMES: list[str] = [
@@ -16,6 +17,30 @@ FEATURE_NAMES: list[str] = [
     "rot_0", "rot_1", "rot_2", "rot_3",
     "opacity",
 ]
+
+def sigmoid(x):
+    return 1 / (1 + np.exp(-x))
+
+
+def prepare_gaussian_cloud(pts: np.ndarray) -> tuple[np.ndarray]:
+    xyz = pts[:, :3]
+    gauss = pts[:, 3:]
+
+    q = gauss[:, 3:7]
+    q_norm = np.linalg.norm(q, axis=1, keepdims=True) + 1e-8 # normalize quaternion
+    gauss[:, 3:7] = q / q_norm
+
+    gauss[:, :3] = normalize(gauss[:, :3])  # normalize scaling
+    gauss[:, 7] = sigmoid(gauss[:, 7])  # apply sigmoid to opacity
+
+    xyz = pts[:, :3]
+    xyz_min = xyz.min(axis=0)
+    xyz_max = xyz.max(axis=0)
+    xyz_normalized = (xyz - xyz_min) / (xyz_max - xyz_min + 1e-8)
+    gauss = pts
+
+    return gauss, xyz_normalized, xyz_min, xyz_max
+
 
 class GaussianPointCloud(Dataset):
     def __init__(
@@ -33,6 +58,7 @@ class GaussianPointCloud(Dataset):
         self.pt_generator = torch.Generator() if exists(random_seed) else None  
         if exists(random_seed):
             self.pt_generator.manual_seed(self.random_seed)
+
 
         self.files: list[tuple[Path, int]] = []
         self.classes: list[str] = []
@@ -84,16 +110,7 @@ class GaussianPointCloud(Dataset):
         if self.sampling_method != "original_size":
             pts = self._sample(pts)
 
-        q = pts[:, 7:11]
-        q_norm = np.linalg.norm(q, axis=1, keepdims=True)
-        q_norm[q_norm == 0] = 1.0
-        pts[:, 7:11] = q / q_norm
-
-        xyz = pts[:, :3]
-        xyz_min = xyz.min(axis=0)
-        xyz_max = xyz.max(axis=0)
-        xyz_normalized = (xyz - xyz_min) / (xyz_max - xyz_min + 1e-8)
-
+        gauss, xyz_normalized, xyz_min, xyz_max = prepare_gaussian_cloud(pts)
         gauss = torch.from_numpy(pts).float()
         
         return {
@@ -185,6 +202,15 @@ class GaussianDataModule(pl.LightningDataModule):
     def val_dataloader(self):
         return DataLoader(
             self.val_ds,
+            batch_size=self.hparams.batch_size,
+            num_workers=self.hparams.num_workers,
+            collate_fn=collate_fn,
+            persistent_workers=True
+        )
+
+    def test_dataloader(self):
+        return DataLoader(
+            self.train_ds,
             batch_size=self.hparams.batch_size,
             num_workers=self.hparams.num_workers,
             collate_fn=collate_fn,
