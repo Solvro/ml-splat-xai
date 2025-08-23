@@ -1,13 +1,14 @@
 from pathlib import Path
-from typing import List, Tuple
 
 import numpy as np
 from numpy.random import default_rng
 import torch
 from plyfile import PlyData
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader, random_split
 from pointnet.pointnet2 import exists
 from pointnet.utils import farthest_point_sampling
+import pytorch_lightning as pl
+from sklearn.preprocessing import normalize 
 
 
 FEATURE_NAMES: list[str] = [
@@ -16,6 +17,29 @@ FEATURE_NAMES: list[str] = [
     "rot_0", "rot_1", "rot_2", "rot_3",
     "opacity",
 ]
+
+def sigmoid(x):
+    return 1 / (1 + np.exp(-x))
+
+
+def prepare_gaussian_cloud(pts: np.ndarray) -> tuple[np.ndarray]:
+    xyz = pts[:, :3]
+    gauss = pts[:, 3:]
+
+    q = gauss[:, 3:7]
+    q_norm = np.linalg.norm(q, axis=1, keepdims=True) + 1e-8 # normalize quaternion
+    gauss[:, 3:7] = q / q_norm
+
+    gauss[:, :3] = normalize(gauss[:, :3])  # normalize scaling
+    gauss[:, 7] = sigmoid(gauss[:, 7])  # apply sigmoid to opacity
+
+    xyz = pts[:, :3]
+    xyz_min = xyz.min(axis=0)
+    xyz_max = xyz.max(axis=0)
+    xyz_normalized = (xyz - xyz_min) / (xyz_max - xyz_min + 1e-8)
+    gauss = pts
+
+    return gauss, xyz_normalized, xyz_min, xyz_max
 
 class GaussianPointCloud(Dataset):
     def __init__(
@@ -34,8 +58,8 @@ class GaussianPointCloud(Dataset):
         if exists(random_seed):
             self.pt_generator.manual_seed(self.random_seed)
 
-        self.files: List[Tuple[Path, int]] = []
-        self.classes: List[str] = []
+        self.files: list[tuple[Path, int]] = []
+        self.classes: list[str] = []
         class_to_idx = {}
 
         for class_dir in sorted(self.root.iterdir()):
@@ -60,52 +84,158 @@ class GaussianPointCloud(Dataset):
             idx = np.random.choice(N, self.num_points, replace=False) if self.rng is None else self.rng.choice(N, self.num_points, replace=False)
         else:
             idx = np.random.choice(N, self.num_points, replace=True) if self.rng is None else self.rng.choice(N, self.num_points, replace=True)
-        return pts[idx]
-    
-    def _sample(self, pts: np.ndarray) -> np.ndarray:
+        return idx
+
+    def _sample_index(self, pts: np.ndarray) -> np.ndarray:
         if self.sampling_method == "random":
             return self._random_sample(pts)
         elif self.sampling_method == "fps":
-            pts_tensor = torch.from_numpy(pts).float().unsqueeze(0)
-            idx = farthest_point_sampling(pts_tensor, self.num_points, self.pt_generator).squeeze(0)
-            return pts[idx.numpy()]
-        elif self.sampling_method == "original_size": # only works when batch size is 1 (for debugging purposes)
-            if pts.shape[0] >= self.num_points:
-                return pts
-            else:
-                raise ValueError("Original size sampling requires at least num_points points in the point cloud.")
+            pts_tensor = torch.from_numpy(pts[:, :3]).float().unsqueeze(0)
+            indices = farthest_point_sampling(pts_tensor, self.num_points, self.pt_generator).squeeze(0)
+            return indices.numpy()
         else:
             raise ValueError(f"Unknown sampling method: {self.sampling_method}")
-
 
     def __len__(self):
         return len(self.files)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         path, label = self.files[idx]
         pts = self._read_ply(path)
-        pts = self._sample(pts)
+        indices = np.arange(pts.shape[0])
 
-        xyz = pts[:, :3]
-        gauss = pts[:, 3:]
+        if self.sampling_method != "original_size":
+            indices = self._sample_index(pts)
+            pts = pts[indices]
 
-        q = gauss[:, 3:7]
-        q_norm = np.linalg.norm(q, axis=1, keepdims=True) + 1e-8
-        gauss[:, 3:7] = q / q_norm
-
-        xyz = torch.from_numpy(xyz).float()
-        gauss = torch.from_numpy(gauss).float()
-        label = torch.tensor(label, dtype=torch.long)
-
+        gauss, xyz_normalized, xyz_min, xyz_max = prepare_gaussian_cloud(pts)
+        gauss = torch.from_numpy(pts).float()
+        
         return {
-            "xyz": xyz,
             "gauss": gauss,
-            "label": label,
+            "xyz_normalized": torch.from_numpy(xyz_normalized).float(),
+            "label": torch.tensor(label, dtype=torch.long),
+            "indices": torch.from_numpy(indices).long(),
         }
 
 
 def collate_fn(batch):
-    xyz = torch.stack([item["xyz"] for item in batch])
-    gauss = torch.stack([item["gauss"] for item in batch])
-    labels = torch.stack([item["label"] for item in batch])
-    return xyz, gauss, labels
+    max_points = max(item["gauss"].shape[0] for item in batch)
+
+    padded_features = []
+    padded_xyz_normalized = []
+    padded_indices = []
+    labels = []
+    masks = []
+
+    for item in batch:
+        features = item["gauss"]
+        xyz_normalized = item["xyz_normalized"]
+        indices = item["indices"]
+        num_points = features.shape[0]
+        
+        mask = torch.zeros(max_points, dtype=torch.bool)
+        mask[:num_points] = True
+        masks.append(mask)
+
+        padding_size = max_points - num_points
+        
+        if padding_size > 0:
+            feature_padding = torch.zeros((padding_size, features.shape[1]), dtype=features.dtype)
+            features = torch.cat([features, feature_padding], dim=0)
+            
+            xyz_padding = torch.zeros((padding_size, 3), dtype=xyz_normalized.dtype)
+            xyz_normalized = torch.cat([xyz_normalized, xyz_padding], dim=0)
+
+            indices_padding = torch.zeros_like((padding_size,), dtype=torch.long)
+            indices_padding.fill_(-1) # Fill with -1 to indicate padding
+            indices = torch.cat([indices, indices_padding], dim=0)
+
+        padded_features.append(features)
+        padded_xyz_normalized.append(xyz_normalized)
+        padded_indices.append(indices)
+        labels.append(item["label"])
+
+    return {
+        "gauss": torch.stack(padded_features).transpose(1, 2), # (B, D, N)
+        "xyz_normalized": torch.stack(padded_xyz_normalized), # (B, N, 3)
+        "label": torch.stack(labels),
+        "mask": torch.stack(masks), # (B, N)
+        "indices": torch.stack(padded_indices), # (B, N)    
+    }
+
+
+class GaussianDataModule(pl.LightningDataModule):
+    def __init__(self,
+             data_dir: str,
+             batch_size: int = 32,
+             num_workers: int = 4,
+             val_split: float = 0.1,
+             sampling: str = "fps",
+             num_points: int = 4096,
+             seed: int = 42) -> None:
+        super().__init__()
+        self.save_hyperparameters()
+        self.train_ds, self.val_ds = None, None
+        self.num_classes, self.in_dim = 0, len(FEATURE_NAMES)
+        self.data_dir = data_dir
+        self.sampling = sampling
+
+    def setup(self, stage: str | None = None):
+        root_path = Path(self.data_dir)
+        if (root_path / "train").exists() and (root_path / "test").exists():
+            train_path = root_path / "train"
+            test_path = root_path / "test"
+        else:
+            train_path = root_path
+            test_path = root_path
+
+        self.test_ds = GaussianPointCloud(
+            test_path,
+            num_points=self.hparams.num_points,
+            sampling_method=self.hparams.sampling,
+            random_seed=self.hparams.seed
+        )
+        dataset = GaussianPointCloud(
+            train_path,
+            num_points=self.hparams.num_points,
+            sampling_method=self.hparams.sampling,
+            random_seed=self.hparams.seed
+        )
+        self.num_classes = len(dataset.classes)
+        n_val = int(len(dataset) * self.hparams.val_split)
+        n_train = len(dataset) - n_val
+        self.train_ds, self.val_ds = random_split(
+            dataset,
+            [n_train, n_val],
+            generator=torch.Generator().manual_seed(self.hparams.seed)
+        )
+
+    def train_dataloader(self):
+        return DataLoader(
+            self.train_ds,
+            batch_size=self.hparams.batch_size,
+            shuffle=True,
+            num_workers=self.hparams.num_workers,
+            collate_fn=collate_fn,
+            drop_last=True,
+            persistent_workers=True
+        )
+
+    def val_dataloader(self):
+        return DataLoader(
+            self.val_ds,
+            batch_size=self.hparams.batch_size,
+            num_workers=self.hparams.num_workers,
+            collate_fn=collate_fn,
+            persistent_workers=True
+        )
+
+    def test_dataloader(self):
+        return DataLoader(
+            self.test_ds,
+            batch_size=self.hparams.batch_size,
+            num_workers=self.hparams.num_workers,
+            collate_fn=collate_fn,
+            persistent_workers=True,
+        )

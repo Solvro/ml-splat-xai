@@ -1,4 +1,4 @@
-from .pointnet import STN, PointNetCls, PointNetSeg
+from .pointnet import STN, PointNetCls
 from .pointnet2 import (
     PointNet2ClsSSG,
     PointNet2ClsMSG,
