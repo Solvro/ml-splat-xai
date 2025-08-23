@@ -3,3 +3,10 @@ plyfile
 torch>=1.10
 einops>=0.6.1
 taichi>=1.6.0
+tensorboard==2.20.0
+pytorch-lightning==2.5.2
+scikit-learn==1.7.1
+einops==0.8.1
+plyfile==1.1.2
+tensorboard==2.20.0
+torchmetrics==0.11.4

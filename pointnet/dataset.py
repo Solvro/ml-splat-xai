@@ -8,7 +8,7 @@ from torch.utils.data import Dataset, DataLoader, random_split
 from pointnet.pointnet2 import exists
 from pointnet.utils import farthest_point_sampling
 import pytorch_lightning as pl
-from sklearn.preprocessing import normalize
+from sklearn.preprocessing import normalize 
 
 
 FEATURE_NAMES: list[str] = [
@@ -41,7 +41,6 @@ def prepare_gaussian_cloud(pts: np.ndarray) -> tuple[np.ndarray]:
 
     return gauss, xyz_normalized, xyz_min, xyz_max
 
-
 class GaussianPointCloud(Dataset):
     def __init__(
         self,
@@ -58,7 +57,6 @@ class GaussianPointCloud(Dataset):
         self.pt_generator = torch.Generator() if exists(random_seed) else None  
         if exists(random_seed):
             self.pt_generator.manual_seed(self.random_seed)
-
 
         self.files: list[tuple[Path, int]] = []
         self.classes: list[str] = []
@@ -86,17 +84,15 @@ class GaussianPointCloud(Dataset):
             idx = np.random.choice(N, self.num_points, replace=False) if self.rng is None else self.rng.choice(N, self.num_points, replace=False)
         else:
             idx = np.random.choice(N, self.num_points, replace=True) if self.rng is None else self.rng.choice(N, self.num_points, replace=True)
-        return pts[idx]
+        return idx
 
-    def _sample(self, pts: np.ndarray) -> np.ndarray:
+    def _sample_index(self, pts: np.ndarray) -> np.ndarray:
         if self.sampling_method == "random":
             return self._random_sample(pts)
         elif self.sampling_method == "fps":
             pts_tensor = torch.from_numpy(pts[:, :3]).float().unsqueeze(0)
             indices = farthest_point_sampling(pts_tensor, self.num_points, self.pt_generator).squeeze(0)
-            return pts[indices.numpy()]
-        elif self.sampling_method == "original_size":
-            return pts
+            return indices.numpy()
         else:
             raise ValueError(f"Unknown sampling method: {self.sampling_method}")
 
@@ -106,9 +102,11 @@ class GaussianPointCloud(Dataset):
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         path, label = self.files[idx]
         pts = self._read_ply(path)
-        
+        indices = np.arange(pts.shape[0])
+
         if self.sampling_method != "original_size":
-            pts = self._sample(pts)
+            indices = self._sample_index(pts)
+            pts = pts[indices]
 
         gauss, xyz_normalized, xyz_min, xyz_max = prepare_gaussian_cloud(pts)
         gauss = torch.from_numpy(pts).float()
@@ -117,6 +115,7 @@ class GaussianPointCloud(Dataset):
             "gauss": gauss,
             "xyz_normalized": torch.from_numpy(xyz_normalized).float(),
             "label": torch.tensor(label, dtype=torch.long),
+            "indices": torch.from_numpy(indices).long(),
         }
 
 
@@ -125,12 +124,14 @@ def collate_fn(batch):
 
     padded_features = []
     padded_xyz_normalized = []
+    padded_indices = []
     labels = []
     masks = []
 
     for item in batch:
         features = item["gauss"]
         xyz_normalized = item["xyz_normalized"]
+        indices = item["indices"]
         num_points = features.shape[0]
         
         mask = torch.zeros(max_points, dtype=torch.bool)
@@ -146,15 +147,21 @@ def collate_fn(batch):
             xyz_padding = torch.zeros((padding_size, 3), dtype=xyz_normalized.dtype)
             xyz_normalized = torch.cat([xyz_normalized, xyz_padding], dim=0)
 
+            indices_padding = torch.zeros_like((padding_size,), dtype=torch.long)
+            indices_padding.fill_(-1) # Fill with -1 to indicate padding
+            indices = torch.cat([indices, indices_padding], dim=0)
+
         padded_features.append(features)
         padded_xyz_normalized.append(xyz_normalized)
+        padded_indices.append(indices)
         labels.append(item["label"])
 
     return {
         "gauss": torch.stack(padded_features).transpose(1, 2), # (B, D, N)
         "xyz_normalized": torch.stack(padded_xyz_normalized), # (B, N, 3)
         "label": torch.stack(labels),
-        "mask": torch.stack(masks) # (B, N)
+        "mask": torch.stack(masks), # (B, N)
+        "indices": torch.stack(padded_indices), # (B, N)    
     }
 
 
@@ -171,10 +178,26 @@ class GaussianDataModule(pl.LightningDataModule):
         self.save_hyperparameters()
         self.train_ds, self.val_ds = None, None
         self.num_classes, self.in_dim = 0, len(FEATURE_NAMES)
+        self.data_dir = data_dir
+        self.sampling = sampling
 
     def setup(self, stage: str | None = None):
+        root_path = Path(self.data_dir)
+        if (root_path / "train").exists() and (root_path / "test").exists():
+            train_path = root_path / "train"
+            test_path = root_path / "test"
+        else:
+            train_path = root_path
+            test_path = root_path
+
+        self.test_ds = GaussianPointCloud(
+            test_path,
+            num_points=self.hparams.num_points,
+            sampling_method=self.hparams.sampling,
+            random_seed=self.hparams.seed
+        )
         dataset = GaussianPointCloud(
-            Path(self.hparams.data_dir),
+            train_path,
             num_points=self.hparams.num_points,
             sampling_method=self.hparams.sampling,
             random_seed=self.hparams.seed
@@ -210,9 +233,9 @@ class GaussianDataModule(pl.LightningDataModule):
 
     def test_dataloader(self):
         return DataLoader(
-            self.train_ds,
+            self.test_ds,
             batch_size=self.hparams.batch_size,
             num_workers=self.hparams.num_workers,
             collate_fn=collate_fn,
-            persistent_workers=True
+            persistent_workers=True,
         )
