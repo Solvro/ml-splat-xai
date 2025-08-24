@@ -1,5 +1,4 @@
 import os
-import random
 from sklearn.model_selection import train_test_split
 import shutil
 import argparse
@@ -7,6 +6,8 @@ import argparse
 
 def split_dataset(folder_path, train_size=0.8, seed=777):
     for category in os.listdir(folder_path):
+        if "train" in category or "test" in category:
+            continue
         category_path = os.path.join(folder_path, category)
         files = os.listdir(category_path)
         os.makedirs(os.path.join(folder_path, 'train', category), exist_ok=True)
