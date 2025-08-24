@@ -149,7 +149,7 @@ class PointNetCls(nn.Module):
         )
 
         self.voxel_agg = VoxelAggregation(grid_size, pooling=pooling)
-        self.conv3 = nn.Conv1d(in_channels=1024, out_channels=1, kernel_size=1, padding='same')
+        self.conv3 = nn.Conv1d(in_channels=1024, out_channels=1, kernel_size=1, padding='same', bias=False)
 
         norm = nn.LayerNorm if head_norm else nn.Identity
         
@@ -177,7 +177,15 @@ class PointNetCls(nn.Module):
         transform_3d = self.stn_3d(xyz_transposed)
         if isinstance(self.stn_3d, STN):
             xyz_transposed = torch.bmm(transform_3d, xyz_transposed)
-            xyz_transposed = rescale_to_unit_cube(xyz_transposed, mask)
+            self.last_stn_T = transform_3d.detach()
+            xyz_transposed, (min_used, max_used) = rescale_to_unit_cube(xyz_transposed, mask, return_affine=True)
+            self.last_rescale_min = min_used.detach()
+            self.last_rescale_max = max_used.detach()
+        else:
+            self.last_stn_T = None
+            self.last_rescale_min = None
+            self.last_rescale_max = None
+
 
         features = torch.cat([xyz_transposed, features[:, 3:, :]], dim=1)
 
