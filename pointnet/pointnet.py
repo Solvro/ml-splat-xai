@@ -74,7 +74,7 @@ class VoxelAggregation(nn.Module):
     def forward(self, features: torch.Tensor, xyz_coords_for_voxelization: torch.Tensor, mask: torch.Tensor | None = None):
         # features: (B, D, N)
         # xyz_coords_for_voxelization: (B, N, 3)
-        B, D, N = features.shape
+        B, D, _ = features.shape
         G = self.grid_size
 
         voxel_indices = torch.floor(xyz_coords_for_voxelization * G).long()  # (B, N, 3)
@@ -149,11 +149,11 @@ class PointNetCls(nn.Module):
         )
 
         self.voxel_agg = VoxelAggregation(grid_size, pooling=pooling)
-        self.conv3 = nn.Conv1d(in_channels=1024, out_channels=1, kernel_size=1, padding='same', bias=False)
+        self.voxel_avg_pool= nn.AdaptiveAvgPool1d(1)
 
         norm = nn.LayerNorm if head_norm else nn.Identity
-        
-        head_size = self.grid_size ** 3
+
+        head_size = 1024
         self.head = nn.Sequential(
             norm(head_size),
             nn.GELU(),
@@ -202,10 +202,12 @@ class PointNetCls(nn.Module):
         voxel_features, indices, point_counts = self.voxel_agg(point_features, xyz_for_vox, mask) # (B, 1024, G, G, G)
 
         voxel_features = rearrange(voxel_features, 'b d x y z -> b d (x y z)')  # (B, 1024, G^3)
+
+        global_features = self.voxel_avg_pool(voxel_features)
+        global_features = global_features.squeeze(-1)
         
-        voxel_activations_3d = self.conv3(voxel_features)  # (B, 1, G^3)
-        global_features = voxel_activations_3d.squeeze(1)  # (B, G^3)
-        voxel_activations_3d = voxel_activations_3d.reshape(-1, self.grid_size, self.grid_size, self.grid_size)  # (B, G, G, G)
+        # voxel_activations_3d = self.conv3(voxel_features)  # (B, 1, G^3)
+        voxel_activations_3d = voxel_features.reshape(-1, self.grid_size, self.grid_size, self.grid_size)  # (B, G, G, G)
 
         logits = self.head(global_features) # (B, out_dim)
 
