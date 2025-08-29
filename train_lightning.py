@@ -85,13 +85,6 @@ def main():
         figure_dpi=160
     )
 
-    early_stop_callback = EarlyStopping(
-        monitor='val_acc',
-        patience=5,
-        verbose=True,
-        mode='max',
-    )
-
     lr_monitor = LearningRateMonitor(logging_interval='epoch')
     logger = TensorBoardLogger(model_save_dir, name=args.model_save_name)
 
@@ -99,7 +92,7 @@ def main():
         max_epochs=args.epochs,
         accelerator=args.accelerator,
         devices=args.device,
-        callbacks=[checkpoint_callback, lr_monitor, viz_cb, early_stop_callback],
+        callbacks=[checkpoint_callback, lr_monitor, viz_cb],
         log_every_n_steps=10,
         fast_dev_run=args.fast_dev_run,
         logger=logger,
