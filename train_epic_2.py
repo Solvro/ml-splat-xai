@@ -28,18 +28,14 @@ def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device
             if mask is not None:
                 mask = mask.to(device)
 
-            # Użyj prawdziwych indeksów z datasetu
             dataset_indices = batch["indices"].to(device)
 
-            # Przejdź przez pełną forward pass, aby dostać aktywacje wokseli
             point_features, _ = model.extract_point_features(features, xyz_normalized, mask)
             
-            # Zastosuj macierz disentanglującą jeśli podana
             if U is not None:
                 U = U.to(point_features.device)
                 point_features = torch.einsum("dc,bdn->bcn", U, point_features)
             
-            # Przejdź przez agregację wokselową, aby dostać aktywacje wokseli
             voxel_features, voxel_indices, point_counts = model.voxel_agg(point_features, 
                                                                          xyz_normalized, 
                                                                          mask)
@@ -199,10 +195,8 @@ class EpicTrainer(pl.LightningModule):
         progress = min(self.current_epoch / self.max_epochs, 1.0)
         self.current_topk = int(self.initial_topk - progress * (self.initial_topk - self.final_topk))
         
-        # Get current U matrix
         U = self.epic.get_weight().detach()
         
-        # Generate new prototypes with current U matrix
         print(f"Generating {self.current_topk} prototypes per channel...")
         prototypes = generate_prototypes_pointnet(
             self.pointnet,
@@ -222,7 +216,6 @@ class EpicTrainer(pl.LightningModule):
             U=U
         )
         
-        # Update dataloaders
         prototypes_dataset = PrototypesDataset(train_dataloader.dataset, prototypes)
         self.prototypes_loader = DataLoader(
             prototypes_dataset,
