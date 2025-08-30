@@ -2,6 +2,7 @@ import argparse
 from torch.utils.data import Dataset, DataLoader
 import os
 from pytorch_lightning.loggers import TensorBoardLogger
+from einops import rearrange
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
@@ -9,13 +10,6 @@ from pointnet.pointnet import PointNetLightning
 from pointnet.dataset import GaussianDataModule, FEATURE_NAMES, collate_fn
 from pointnet.epic import EpicDisentangler
 from tqdm import tqdm
-
-
-def compute_channel_activation_pointnet(feature_map, mask=None):
-    if mask is not None:
-        mask_exp = mask.unsqueeze(1)  # (B, 1, N)
-        feature_map = feature_map * mask_exp.float()
-    return feature_map.sum(dim=2)  # (B, C)
 
 
 def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device="cpu"):
@@ -40,10 +34,16 @@ def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device
 
             point_features, _ = model.extract_point_features(features, xyz_normalized, mask)
             
-            channel_activations = compute_channel_activation_pointnet(point_features, mask)  # (B, C)
+            voxel_features, voxel_indices, point_counts = model.voxel_agg(point_features, 
+                                                                         rearrange(xyz_normalized, 'b n d -> b n d'), 
+                                                                         mask)
+            
+            # voxel_features: (B, C, G, G, G)
+            voxel_features_flat = rearrange(voxel_features, 'b c x y z -> b c (x y z)')
+            max_voxel_activations, _ = torch.max(voxel_features_flat, dim=2)  # (B, C)
 
             for c in range(num_channels):
-                activations = channel_activations[:, c]  # (B,)
+                activations = max_voxel_activations[:, c]  # (B,)
                 
                 combined_activations = torch.cat([top_activations[:, c], activations])
                 combined_indices = torch.cat([top_indices[:, c], global_indices])
