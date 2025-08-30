@@ -147,8 +147,7 @@ def collate_fn(batch):
             xyz_padding = torch.zeros((padding_size, 3), dtype=xyz_normalized.dtype)
             xyz_normalized = torch.cat([xyz_normalized, xyz_padding], dim=0)
 
-            indices_padding = torch.zeros_like((padding_size,), -1, dtype=torch.long)
-            indices_padding.fill_(-1) # Fill with -1 to indicate padding
+            indices_padding = torch.full((padding_size,), -1, dtype=torch.long)
             indices = torch.cat([indices, indices_padding], dim=0)
 
         padded_features.append(features)
