@@ -16,7 +16,7 @@ class EpicDisentangler(nn.Module):
         anti_sym = self.A_raw - self.A_raw.T
         W = torch.matrix_exp(anti_sym)
         
-        return torch.einsum("dc,bdn->bcn", W, point_features)
+        return torch.einsum("cd,bdn->bcn", W, point_features)
 
     @torch.no_grad()
     def get_weight(self) -> torch.Tensor:
