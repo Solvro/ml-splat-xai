@@ -5,12 +5,14 @@ from pytorch_lightning.loggers import TensorBoardLogger
 import torch
 from typing import Sequence
 import torch.nn.functional as F
+from torch.optim.lr_scheduler import StepLR
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from tqdm import tqdm
 import numpy as np
 from plyfile import PlyData, PlyElement
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 from pointnet.pointnet import PointNetLightning
 from pointnet.dataset import GaussianDataModule, FEATURE_NAMES, collate_fn
@@ -51,7 +53,7 @@ def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device
         voxel_features, voxel_indices, point_counts = model.voxel_agg(point_features, xyz_for_vox, mask)
 
         voxel_mask = (point_counts.squeeze(1) > 0)  # (B, V)
-        voxel_features_flat = rearrange(voxel_features, 'b c x y z -> b c (x y z)')
+        voxel_features_flat = rearrange(voxel_features, "b c x y z -> b c (x y z)")
         voxel_features_flat = F.relu(voxel_features_flat)
 
         voxel_features_flat = voxel_features_flat.masked_fill(
@@ -78,7 +80,7 @@ def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device
         top_acts[:, channels_to_update] = vals
         top_inds[:, channels_to_update] = combined_inds[:, channels_to_update][idxs, torch.arange(len(channels_to_update))]
 
-    prototypes_dict = {c: top_inds[:, c].cpu().numpy().tolist() for c in range(num_channels)}
+    prototypes_dict = {c: top_inds[:, c].cpu().numpy().tolist() for c in range(num_channels)} # is this invariant to shuffling
     return prototypes_dict
 
 
@@ -99,7 +101,7 @@ def purity_argmax_voxel(voxel_features: torch.Tensor, channels: torch.Tensor) ->
 
     valid = torch.isfinite(max_vals)
     purity = torch.where(valid, purity, purity.new_zeros(purity.shape))
-    return purity
+    return purity, channels, vectors
 
 
 class PrototypesDataset(Dataset):
@@ -143,11 +145,12 @@ class EpicTrainer(pl.LightningModule):
         pointnet_model,
         num_channels=1024,
         lr: float = 1e-4,
-        initial_topk=40,
+        initial_topk=5,
         final_topk=5,
         max_epochs=20,
         point_subset_ratio: float = 1.0,
-        subset_seed: int | None = None
+        subset_seed: int | None = None,
+        log_interval : int = 100,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["pointnet_model"])
@@ -163,6 +166,7 @@ class EpicTrainer(pl.LightningModule):
         self.prototypes_loader = None
         self.val_prototypes_loader = None
         self.current_topk = initial_topk
+        self.log_interval = log_interval
 
         self.last_val_prototypes = None
 
@@ -176,23 +180,31 @@ class EpicTrainer(pl.LightningModule):
         with torch.no_grad():
             point_features, xyz_for_vox = self.pointnet.extract_point_features(features, xyz_normalized, mask)
 
-        point_features = self.epic(point_features)
-        voxel_features, indices_vox, point_counts = self.pointnet.voxel_agg(point_features, xyz_for_vox, mask)
+        point_features_before = point_features.clone().detach()
+        point_features = self.epic(point_features) # what size is here and values after that | difference before and after epic
 
-        voxel_mask = (point_counts.squeeze(1) > 0)
+        self.log_feature_differences(point_features_before, point_features, stage="train")
+
+        voxel_features, indices_vox, point_counts = self.pointnet.voxel_agg(point_features, xyz_for_vox, mask)# voxel features values plot
+
         voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1)
-        voxel_features_flat = F.relu(voxel_features_flat)
-        voxel_features_flat = voxel_features_flat.masked_fill(
-            ~voxel_mask.unsqueeze(1).expand_as(voxel_features_flat),
-            -float("inf")
-        )
 
-        purity = purity_argmax_voxel(voxel_features_flat, channels)
+        purity, channels, vectors = purity_argmax_voxel(voxel_features_flat, channels)
         loss = -purity.mean()
+
+        if batch_idx % self.log_interval == 0:
+            self.plot_top_channels(vectors, stage="train")
+            self.plot_point_feature_changes(point_features_before, point_features, stage="train")
 
         self.log("train/purity_mean", purity.mean(), prog_bar=True)
         self.log("train/purity_loss", loss, prog_bar=True)
         return loss
+    
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        if batch_idx % self.log_interval == 0:
+            self.plot_matrix(self.epic.get_weight, "disentanglement")
+            self.plot_matrix(self.epic.get_grad, "disentanglement_grad")
+            self.log("train/mean_disentanglement_grad", self.epic.get_grad().abs().mean().item() if self.epic.get_grad() is not None else 0.0, prog_bar=True)
 
     def validation_step(self, batch, batch_idx):
         self.pointnet.eval()
@@ -204,19 +216,21 @@ class EpicTrainer(pl.LightningModule):
         with torch.no_grad():
             point_features, xyz_for_vox = self.pointnet.extract_point_features(features, xyz_normalized, mask)
 
+        point_features_before = point_features.clone().detach()
         point_features = self.epic(point_features)
+
+        self.log_feature_differences(point_features_before, point_features, stage="val")
+            
         voxel_features, indices_vox, point_counts = self.pointnet.voxel_agg(point_features, xyz_for_vox, mask)
 
-        voxel_mask = (point_counts.squeeze(1) > 0)
         voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1)
-        voxel_features_flat = F.relu(voxel_features_flat)
-        voxel_features_flat = voxel_features_flat.masked_fill(
-            ~voxel_mask.unsqueeze(1).expand_as(voxel_features_flat),
-            -float("inf")
-        )
 
-        purity = purity_argmax_voxel(voxel_features_flat, channels)
+        purity, channels, vectors = purity_argmax_voxel(voxel_features_flat, channels)
         loss = -purity.mean()
+
+        if batch_idx % self.log_interval == 0:
+            self.plot_top_channels(vectors, stage="val")
+            self.plot_point_feature_changes(point_features_before, point_features, stage="val")
 
         self.log("val/purity_mean", purity.mean(), prog_bar=True)
         self.log("val/epic_purity_loss", loss, prog_bar=True)
@@ -224,13 +238,79 @@ class EpicTrainer(pl.LightningModule):
 
     def configure_optimizers(self):
         opt = torch.optim.Adam(self.epic.parameters(), lr=self.lr)
-        return opt
+        scheduler = StepLR(opt, step_size=1, gamma=0.5)
+        return opt # , [scheduler]
 
     def train_dataloader(self):
         return self.prototypes_loader
 
     def val_dataloader(self):
         return self.val_prototypes_loader
+    
+    def plot_matrix(self, matrix_func, matrix_name):
+        if matrix_func() is None:
+            print(f"No {matrix_name} matrix to plot.")
+            return
+        U = matrix_func().numpy()
+        fig, ax = plt.subplots(figsize=(10, 10))
+        sns.heatmap(U, cmap="Blues", square=True, cbar_kws={"label": "Value"}, ax=ax)
+        ax.set_title(f"{matrix_name.capitalize()} Matrix")
+        self.logger.experiment.add_figure(
+            f"{matrix_name}_matrix_epoch", 
+            fig, 
+            self.current_epoch
+        )
+        plt.close(fig)
+
+    @torch.no_grad()
+    def log_feature_differences(self, point_features_before, point_features_after, stage):
+        diff = point_features_before - point_features_after
+        mean_diff = diff.abs().mean()
+        max_diff = diff.abs().max()
+        var_diff = diff.abs().var()
+        self.log(f"{stage}/epic_point_feature_abs_change", mean_diff, prog_bar=True)
+        self.log(f"{stage}/epic_point_feature_abs_max_change", max_diff, prog_bar=True)
+        self.log(f"{stage}/epic_point_feature_abs_var_change", var_diff, prog_bar=True)
+
+    @torch.no_grad()
+    def plot_point_feature_changes(self, point_features_before, point_features_after, stage):
+        diff = point_features_before - point_features_after
+        diff_per_channel = diff.abs().mean(dim=(0, 2)).cpu().numpy()
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.bar(range(diff_per_channel.shape[0]), diff_per_channel, color="skyblue")
+        ax.set_xlabel("Channel Index")
+        ax.set_ylabel("Average Absolute Change")
+        ax.set_title("Average Absolute Change per Channel")
+        ax.grid(True)
+
+        self.logger.experiment.add_figure(
+            f"{stage}/epic_channel_changes_b0",
+            fig,
+            self.current_epoch
+        )
+        plt.close(fig)
+
+    @torch.no_grad()
+    def plot_top_channels(self, vectors, stage):
+        top10_channels = torch.topk(vectors, k=10, dim=1) # (B, 10) - want to take 10 first channel values
+        # last10_channels = torch.topk(vectors, k=10, dim=1, largest=False) # (B, 10) - want to take 10 last channel values
+        fig, ax = plt.subplots(figsize=(12, 8))
+        sample_idx = np.random.randint(0, vectors.size(0))
+        ax.bar(top10_channels.indices[sample_idx].cpu().numpy().astype(str), top10_channels.values[sample_idx].cpu().numpy(), color="green", alpha=0.6) # , label="Top 10 Channels")
+        # ax.bar(last10_channels.indices[0].cpu().numpy(), last10_channels.values[0].cpu().numpy(), color="orange", alpha=0.6, label="Last 10 Channels")
+        ax.set_xlabel("Channel Index")
+        ax.set_ylabel("Channel Value")
+        ax.set_title(f"Sample {sample_idx} - Top 10 Channel Features")
+        ax.grid(True)
+        
+        # Log to tensorboard
+        self.logger.experiment.add_figure(
+            f"{stage}/top10_channels_sample_b0", 
+            fig, 
+            self.current_epoch
+        )
+        
+        plt.close(fig)
 
     @torch.no_grad()
     def update_prototypes(self, train_dataset, val_dataset, batch_size, num_workers, device):
@@ -476,15 +556,15 @@ class EpicVisualizationCallback(pl.Callback):
             (0,4),(1,5),(2,6),(3,7)
         ]
         for j, (xyz_raw, mask_voxel, corners_raw) in enumerate(panels, start=1):
-            ax = fig.add_subplot(1, len(panels), j, projection='3d')
+            ax = fig.add_subplot(1, len(panels), j, projection="3d")
             if not isolated:
-                ax.scatter(xyz_raw[:, 0], xyz_raw[:, 1], xyz_raw[:, 2], c='lightgray', s=1, alpha=0.3)
+                ax.scatter(xyz_raw[:, 0], xyz_raw[:, 1], xyz_raw[:, 2], c="lightgray", s=1, alpha=0.3)
             vox_pts = xyz_raw[mask_voxel]
             if vox_pts.size > 0:
-                ax.scatter(vox_pts[:, 0], vox_pts[:, 1], vox_pts[:, 2], c='crimson', s=6 if isolated else 4, alpha=0.95)
+                ax.scatter(vox_pts[:, 0], vox_pts[:, 1], vox_pts[:, 2], c="crimson", s=6 if isolated else 4, alpha=0.95)
             for i_idx, j_idx in edges:
                 xs, ys, zs = corners_raw[[i_idx, j_idx]].T
-                ax.plot(xs, ys, zs, color='gold', lw=1.5, alpha=0.9)
+                ax.plot(xs, ys, zs, color="gold", lw=1.5, alpha=0.9)
             ax.set_title(f"rank {j}")
             ax.set_box_aspect([1, 1, 1])
         fig.suptitle(title)
@@ -599,16 +679,16 @@ class EpicVisualizationCallback(pl.Callback):
 
 
 def main():
-    pointnet_ckpt = 'pointnet_epic_kl_3_5/model.ckpt'
-    data_dir = 'data'
+    pointnet_ckpt = "pointnet_epic_kl_3_5/pointnet_epic_kl_3_5/model_wcss_kl_3-5.ckpt"
+    data_dir = "data"
     batch_size = 4
     num_workers = 2
-    epochs = 75
-    lr = 1e-5
+    epochs = 2
+    lr = 1e-3
     prototype_update_freq = 3
     sampling = "random"
     num_samples = 17500
-    initial_topk = 40
+    initial_topk = 7
     final_topk = 5
     output_dir = "blagam_stary_75_epok"
 
@@ -707,7 +787,8 @@ def main():
         log_every_n_steps=10,
         logger=logger,
         check_val_every_n_epoch=1,
-        num_sanity_val_steps=2
+        num_sanity_val_steps=2,
+        accumulate_grad_batches=4
     )
 
     trainer.fit(epic_trainer)
