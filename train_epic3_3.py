@@ -8,6 +8,7 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from tqdm import tqdm
 import numpy as np
+import torch.nn.functional as F
 
 from pointnet.pointnet import PointNetLightning
 from pointnet.dataset import GaussianDataModule, FEATURE_NAMES, collate_fn
@@ -25,46 +26,44 @@ def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device
 
     with torch.no_grad():
         for batch_idx, batch in tqdm(enumerate(dataloader), total=len(dataloader), desc="Generating prototypes"):
-            features = batch["gauss"].to(device)
+            features = batch["gauss"].to(device)                
             xyz_normalized = batch["xyz_normalized"].to(device)
             mask = batch.get("mask", None)
             if mask is not None:
-                mask = mask.to(device)
-
-            dataset_indices = batch.get("indices", None)
-            if dataset_indices is None:
-                B = features.size(0)
-                dataset_indices = torch.arange(batch_idx * B, batch_idx * B + B, device=device, dtype=torch.long)
-            else:
-                dataset_indices = dataset_indices.to(device)
-                # (B,)
-                if dataset_indices.ndim == 2 and dataset_indices.size(1) == 1:
-                    dataset_indices = dataset_indices.squeeze(1)
-                elif dataset_indices.ndim > 1:
-                    dataset_indices = dataset_indices[:, 0]
-
+                mask = mask.to(device)                         
+            dataset_indices = batch["indices"].to(device)       
             B = features.size(0)
 
             point_features, _ = model.extract_point_features(features, xyz_normalized, mask)
 
             if U is not None:
-                point_features = torch.einsum("dc,bdn->bcn", U, point_features)
+                point_features = torch.einsum("cd,bdn->bcn", U, point_features)
+                point_features = F.relu(point_features)
+            if mask is not None:
+                mask_exp = mask.unsqueeze(1).expand(B, point_features.size(1), point_features.size(2))
+                point_features = point_features.masked_fill(~mask_exp, float("-inf"))
 
-            voxel_features, voxel_indices, point_counts = model.voxel_agg(point_features, xyz_normalized, mask)
-            voxel_features_flat = rearrange(voxel_features, 'b c x y z -> b c (x y z)')
-            max_voxel_activations, _ = torch.max(voxel_features_flat, dim=2)  # (B, C)
+            vals, argidxs = torch.max(point_features, dim=2) 
 
-            combined_acts = torch.cat([top_acts, max_voxel_activations], dim=0)   # (topk+B, C)
-            dataset_idx_exp = dataset_indices.view(B, 1).expand(B, num_channels)  # (B, C)
-            combined_inds = torch.cat([top_inds, dataset_idx_exp], dim=0)        # (topk+B, C)
+            batch_idx_ar = torch.arange(B, device=device).unsqueeze(1) 
+            current_inds = dataset_indices[batch_idx_ar, argidxs] 
 
-            vals, idxs = torch.topk(combined_acts, k=topk, dim=0, largest=True, sorted=True)  # (topk, C)
+            invalid_mask = (vals == float("-inf"))
+            if invalid_mask.any():
+                current_inds = current_inds.clone()
+                current_inds[invalid_mask] = -1
 
-            rows = idxs
+            combined_acts = torch.cat([top_acts, vals], dim=0)      # (topk + B, C)
+            combined_inds = torch.cat([top_inds, current_inds], dim=0)  # (topk + B, C)
+
+            vals_topk, idxs = torch.topk(combined_acts, k=topk, dim=0, largest=True, sorted=True)  # (topk, C)
+
+            rows = idxs  # (topk, C)
             cols = torch.arange(num_channels, device=device).unsqueeze(0).expand(topk, num_channels)  # (topk, C)
+
             new_top_inds = combined_inds[rows, cols]  # (topk, C)
 
-            top_acts = vals
+            top_acts = vals_topk
             top_inds = new_top_inds
 
     prototypes_dict = {c: top_inds[:, c].cpu().numpy().tolist() for c in range(num_channels)}
