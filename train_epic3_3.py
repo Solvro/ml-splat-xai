@@ -8,12 +8,11 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from tqdm import tqdm
 import numpy as np
+
+
+import torch
 import torch.nn.functional as F
-
-from pointnet.pointnet import PointNetLightning
-from pointnet.dataset import GaussianDataModule, FEATURE_NAMES, collate_fn
-from pointnet.epic import EpicDisentangler
-
+from tqdm import tqdm
 
 def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device="cpu", U=None):
     model.eval()
@@ -57,7 +56,6 @@ def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device
             combined_inds = torch.cat([top_inds, current_inds], dim=0)  # (topk + B, C)
 
             vals_topk, idxs = torch.topk(combined_acts, k=topk, dim=0, largest=True, sorted=True)  # (topk, C)
-
             rows = idxs  # (topk, C)
             cols = torch.arange(num_channels, device=device).unsqueeze(0).expand(topk, num_channels)  # (topk, C)
 
@@ -74,8 +72,9 @@ def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device
 def purity_argmax_point(feature_map, channels, mask=None):
     B, C, N = feature_map.shape
     device = feature_map.device
+    mask = None # change
 
-    if mask is not None:
+    if mask is not None: 
         mask_exp = mask.unsqueeze(1).expand(B, C, N)
         feature_map = feature_map.masked_fill(~mask_exp, float("-inf"))
 
@@ -90,10 +89,11 @@ def purity_argmax_point(feature_map, channels, mask=None):
 
     norms = torch.norm(activations_at_max, dim=2, p=2)  # (B, C)
     purity = target_activations / (norms + 1e-8)
-    
+   
     return purity[torch.arange(B), channels]  # (B,)
 
 
+    
 class PrototypesDataset(Dataset):
     def __init__(self, original_dataset, prototypes_dict):
         self.original_dataset = original_dataset
@@ -224,6 +224,7 @@ class EpicTrainer(pl.LightningModule):
             device=device,
             U=U
         )
+        self.last_val_prototypes = val_prototypes
         
         prototypes_dataset = PrototypesDataset(train_dataloader.dataset, prototypes)
         self.prototypes_loader = DataLoader(
@@ -244,20 +245,47 @@ class EpicTrainer(pl.LightningModule):
         )
 
 
+    @torch.no_grad()
+    def on_train_epoch_end(self):
+        if self.val_prototypes_loader is None:
+            return
+
+        all_purities = []
+        device = next(self.parameters()).device
+        for batch in self.val_prototypes_loader:
+            features = batch["gauss"].to(device)
+            xyz = batch["xyz_normalized"].to(device)
+            mask = batch.get("mask", None)
+            if mask is not None:
+                mask = mask.to(device)
+            channels = batch["channel"].to(device)
+
+            point_features, _ = self.pointnet.extract_point_features(features, xyz, mask)
+            point_features = self.epic(point_features)
+
+            purity = purity_argmax_point(point_features, channels, mask)
+            all_purities.append(purity.cpu())
+
+        all_purities = torch.cat(all_purities)
+        mean_val_purity = all_purities.mean()
+        self.log("val/purity_mean", mean_val_purity, prog_bar=True)
+        print(f"Epoch {self.current_epoch}: val/purity_mean = {mean_val_purity:.4f}")
+
+
 
 def main():
 
     pointnet_ckpt = '/kaggle/input/pointnet_wcss/pytorch/default/1/model_wcss_kl_2.ckpt'
     data_dir = '/kaggle/input/gaussy-sigma/data/data'
-    batch_size = 16
+    batch_size = 4
     num_workers = 4
-    epochs = 25
-    lr = 1e-4
+    epochs = 20
+    lr = 1e-4 
     prototype_update_freq = 2
     sampling = "random"
-    num_samples = 50000
-    initial_topk = 40
-    final_topk = 5
+    num_samples = 75000
+    initial_topk = 30
+    final_topk = 3
     output_dir = "/kaggle/working/"
 
     dm = GaussianDataModule(
@@ -341,7 +369,7 @@ def main():
         def on_train_epoch_start(self, trainer, pl_module):
             # Update prototypes every N epochs
             if trainer.current_epoch % self.update_freq == 0:
-                pl_module.update_prototypes(self.train_dataloader, self.val_dataloader, self.device)
+                pl_module.update_prototypes(self.train_dataloader, self.val_dataloader, self.device)                    
     
     prototype_callback = PrototypeUpdateCallback(
         prototype_update_freq,
@@ -349,6 +377,7 @@ def main():
         dm.val_dataloader(),
         device
     )
+    # visualize_callback = EpicVisualizationCallback(val_dataset=val_prototypes_dataset, data_dir=data_dir)
     
     
     trainer = pl.Trainer(

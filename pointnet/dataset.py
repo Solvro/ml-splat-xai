@@ -21,25 +21,25 @@ FEATURE_NAMES: list[str] = [
 def sigmoid(x):
     return 1 / (1 + np.exp(-x))
 
-
 def prepare_gaussian_cloud(pts: np.ndarray) -> tuple[np.ndarray]:
+    from sklearn.preprocessing import normalize
     xyz = pts[:, :3]
     gauss = pts[:, 3:]
 
     q = gauss[:, 3:7]
-    q_norm = np.linalg.norm(q, axis=1, keepdims=True) + 1e-8 # normalize quaternion
+    q_norm = np.linalg.norm(q, axis=1, keepdims=True) + 1e-8
     gauss[:, 3:7] = q / q_norm
 
-    gauss[:, :3] = normalize(gauss[:, :3])  # normalize scaling
-    gauss[:, 7] = sigmoid(gauss[:, 7])  # apply sigmoid to opacity
+    gauss[:, :3] = normalize(gauss[:, :3])
 
-    xyz = pts[:, :3]
+    gauss[:, 7] = sigmoid(gauss[:, 7])
+
+    xyz_normalized = normalize(xyz, axis=1)  # change normlaization
+
     xyz_min = xyz.min(axis=0)
     xyz_max = xyz.max(axis=0)
-    xyz_normalized = (xyz - xyz_min) / (xyz_max - xyz_min + 1e-8)
-    gauss = pts
 
-    return gauss, xyz_normalized, xyz_min, xyz_max
+    return pts, xyz_normalized.astype(np.float32), xyz_min, xyz_max
 
 class GaussianPointCloud(Dataset):
     def __init__(
