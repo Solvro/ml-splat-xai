@@ -1,3 +1,4 @@
+# train epic
 import argparse
 from torch.utils.data import Dataset, DataLoader
 from einops import rearrange
@@ -13,6 +14,10 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
+
+from pointnet.pointnet import PointNetLightning
+from pointnet.dataset import GaussianDataModule, FEATURE_NAMES, collate_fn
+from pointnet.epic import EpicDisentangler
 
 def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device="cpu", U=None):
     model.eval()
@@ -192,7 +197,18 @@ class EpicTrainer(pl.LightningModule):
 
     def configure_optimizers(self):
         opt = torch.optim.Adam(self.epic.parameters(), lr=self.lr)
-        return opt
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt,
+            T_max=self.max_epochs,   
+            eta_min=5*1e-6             
+        )
+        return {
+            "optimizer": opt,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "epoch",   # update co epokę
+            }
+        }
 
     def train_dataloader(self):
         return self.prototypes_loader
@@ -275,18 +291,20 @@ class EpicTrainer(pl.LightningModule):
 
 def main():
 
-    pointnet_ckpt = '/kaggle/input/pointnet_wcss/pytorch/default/1/model_wcss_kl_2.ckpt'
-    data_dir = '/kaggle/input/gaussy-sigma/data/data'
+    # pointnet_ckpt = '/kaggle/input/pointnet_wcss/pytorch/default/1/model_wcss_kl_2.ckpt'
+    # data_dir = '/kaggle/input/gaussy-sigma/data/data'
+    pointnet_ckpt = '/pointnet_toys_kl_3-5.ckpt'
+    data_dir = '/new_dataset/new_dataset'
     batch_size = 4
     num_workers = 4
-    epochs = 20
+    epochs = 50
     lr = 1e-4 
     prototype_update_freq = 2
-    sampling = "random"
+    sampling = "original_size"
     num_samples = 75000
-    initial_topk = 30
-    final_topk = 3
-    output_dir = "/kaggle/working/"
+    initial_topk = 50
+    final_topk = 5
+    output_dir = "/experiments/"
 
     dm = GaussianDataModule(
         data_dir=data_dir,
@@ -297,6 +315,11 @@ def main():
         num_points=num_samples,
     )
     dm.setup()
+    train_dataset = dm.train_ds
+    val_dataset = dm.val_ds
+
+    print(f"Training dataset size: {len(train_dataset)}")
+    print(f"Validation dataset size: {len(val_dataset)}")
     
     pl_model = PointNetLightning.load_from_checkpoint(
         pointnet_ckpt,
@@ -377,7 +400,17 @@ def main():
         dm.val_dataloader(),
         device
     )
-    # visualize_callback = EpicVisualizationCallback(val_dataset=val_prototypes_dataset, data_dir=data_dir)
+    
+    # epic_viz_cb = EpicVisualizationCallback(
+    #     output_dir=os.path.join(output_dir, "epic_visualizations"),
+    #     num_channels=6,
+    #     grid_size=10,
+    #     val_dataset=val_dataset,
+    #     batch_size=batch_size,
+    #     num_workers=num_workers,
+    #     data_dir=data_dir,
+    #     num_prototypes=5
+    # )
     
     
     trainer = pl.Trainer(
