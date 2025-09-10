@@ -179,13 +179,8 @@ class EpicTrainer(pl.LightningModule):
         point_features = self.epic(point_features)
         voxel_features, indices_vox, point_counts = self.pointnet.voxel_agg(point_features, xyz_for_vox, mask)
 
-        voxel_mask = (point_counts.squeeze(1) > 0)
         voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1)
         voxel_features_flat = F.relu(voxel_features_flat)
-        voxel_features_flat = voxel_features_flat.masked_fill(
-            ~voxel_mask.unsqueeze(1).expand_as(voxel_features_flat),
-            -float("inf")
-        )
 
         purity = purity_argmax_voxel(voxel_features_flat, channels)
         loss = -purity.mean()
@@ -207,13 +202,8 @@ class EpicTrainer(pl.LightningModule):
         point_features = self.epic(point_features)
         voxel_features, indices_vox, point_counts = self.pointnet.voxel_agg(point_features, xyz_for_vox, mask)
 
-        voxel_mask = (point_counts.squeeze(1) > 0)
         voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1)
         voxel_features_flat = F.relu(voxel_features_flat)
-        voxel_features_flat = voxel_features_flat.masked_fill(
-            ~voxel_mask.unsqueeze(1).expand_as(voxel_features_flat),
-            -float("inf")
-        )
 
         purity = purity_argmax_voxel(voxel_features_flat, channels)
         loss = -purity.mean()
@@ -227,35 +217,19 @@ class EpicTrainer(pl.LightningModule):
         return opt
 
     def train_dataloader(self):
+        print("Get train_loader")
         return self.prototypes_loader
 
     def val_dataloader(self):
+        print("Get val_loader")
         return self.val_prototypes_loader
 
     @torch.no_grad()
-    def update_prototypes(self, train_dataset, val_dataset, batch_size, num_workers, device):
+    def update_prototypes(self, train_loader, val_loader, batch_size, num_workers, device):
         progress = min(self.current_epoch / max(1, self.max_epochs), 1.0)
         self.current_topk = int(self.initial_topk - progress * (self.initial_topk - self.final_topk))
 
         U = self.epic.get_weight().to(device)
-
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers,
-            collate_fn=collate_fn,
-            drop_last=False
-        )
-
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=batch_size,
-            shuffle=False,
-            num_workers=num_workers,
-            collate_fn=collate_fn,
-            drop_last=False
-        )
 
         print(f"Generating {self.current_topk} prototypes per channel...")
         prototypes = generate_prototypes_pointnet(
@@ -288,6 +262,9 @@ class EpicTrainer(pl.LightningModule):
             )
             print(f"{name} stats: Total indices: {total_indices}, Valid indices: {valid_indices}, Dataset size: {len(dataset)}")
 
+        train_dataset = train_loader.dataset
+        val_dataset = val_loader.dataset
+
         debug_prototypes(prototypes, train_dataset, "Training")
         debug_prototypes(val_prototypes, val_dataset, "Validation")
 
@@ -315,19 +292,20 @@ class EpicTrainer(pl.LightningModule):
 
 
 class PrototypeUpdateCallback(pl.Callback):
-    def __init__(self, update_freq, train_dataset, val_dataset, batch_size, num_workers, device):
+    def __init__(self, update_freq, train_loader, val_loader, batch_size, num_workers, device):
         self.update_freq = update_freq
-        self.train_dataset = train_dataset
-        self.val_dataset = val_dataset
+        self.train_loader = train_loader
+        self.val_loader = val_loader
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.device = device
 
-    def on_train_epoch_start(self, trainer, pl_module):
-        if trainer.current_epoch % self.update_freq == 0:
+    def on_train_epoch_end(self, trainer, pl_module):
+        if not (trainer.current_epoch + 1) % self.update_freq:
+            print("Updating datasets ...")
             pl_module.update_prototypes(
-                self.train_dataset,
-                self.val_dataset,
+                self.train_loader,
+                self.val_loader,
                 self.batch_size,
                 self.num_workers,
                 self.device
@@ -599,7 +577,7 @@ class EpicVisualizationCallback(pl.Callback):
 
 
 def main():
-    pointnet_ckpt = 'pointnet_epic_kl_3_5/model.ckpt'
+    pointnet_ckpt = 'pointnet_epic_kl_3_5/model_wcss_kl_3-5.ckpt'
     data_dir = 'data'
     batch_size = 4
     num_workers = 2
@@ -652,9 +630,27 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    epic_trainer.update_prototypes(
+    train_loader = DataLoader(
         train_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=collate_fn,
+        drop_last=False
+    )
+
+    val_loader = DataLoader(
         val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        collate_fn=collate_fn,
+        drop_last=False
+    )
+
+    epic_trainer.update_prototypes(
+        train_loader,
+        val_loader,
         batch_size,
         num_workers,
         device
@@ -681,8 +677,8 @@ def main():
 
     prototype_callback = PrototypeUpdateCallback(
         prototype_update_freq,
-        train_dataset,
-        val_dataset,
+        train_loader,
+        val_loader,
         batch_size,
         num_workers,
         device
@@ -707,7 +703,9 @@ def main():
         log_every_n_steps=10,
         logger=logger,
         check_val_every_n_epoch=1,
-        num_sanity_val_steps=2
+        num_sanity_val_steps=2,
+        accumulate_grad_batches=4,
+        reload_dataloaders_every_n_epochs=prototype_update_freq
     )
 
     trainer.fit(epic_trainer)
