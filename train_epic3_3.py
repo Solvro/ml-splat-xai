@@ -320,6 +320,8 @@ def main():
     dm.setup()
     train_dataset = dm.train_ds
     val_dataset = dm.val_ds
+    train_loader = dm.train_dataloader()
+    val_loader = dm.val_dataloader()
 
     print(f"Training dataset size: {len(train_dataset)}")
     print(f"Validation dataset size: {len(val_dataset)}")
@@ -348,27 +350,7 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
     # Initial prototype generation
-    epic_trainer.update_prototypes(dm.train_dataloader(), dm.val_dataloader(), device)
-    
-    val_prototypes_dict = generate_prototypes_pointnet(
-        epic_trainer.pointnet,
-        dm.val_dataloader(),
-        num_channels=epic_trainer.hparams.num_channels,
-        topk=5,
-        device=device,
-        U=epic_trainer.epic.get_weight().detach()
-    )
-    
-    val_prototypes_dataset = PrototypesDataset(dm.val_dataloader().dataset, val_prototypes_dict)
-    val_prototypes_loader = DataLoader(
-        val_prototypes_dataset,
-        batch_size=epic_trainer.hparams.batch_size,
-        shuffle=False,
-        num_workers=epic_trainer.hparams.num_workers,
-        collate_fn=collate_prototypes
-    )
-
-    epic_trainer.val_prototypes_loader = val_prototypes_loader
+    epic_trainer.update_prototypes(train_loader, val_loader, device)
     
     os.makedirs(output_dir, exist_ok=True)
     
@@ -384,7 +366,7 @@ def main():
     
     logger = TensorBoardLogger(output_dir, name="epic_logs")
     
-    # Custom callback to update prototypes during training
+
     class PrototypeUpdateCallback(pl.Callback):
         def __init__(self, update_freq, train_dataloader, val_dataloader, device):
             self.update_freq = update_freq
@@ -392,15 +374,19 @@ def main():
             self.val_dataloader = val_dataloader
             self.device = device
             
-        def on_train_epoch_start(self, trainer, pl_module):
-            # Update prototypes every N epochs
-            if trainer.current_epoch % self.update_freq == 0:
-                pl_module.update_prototypes(self.train_dataloader, self.val_dataloader, self.device)                    
+        def on_train_epoch_end(self, trainer, pl_module):
+            if not (trainer.current_epoch + 1) % self.update_freq:
+                print("Updating datasets")
+                pl_module.update_prototypes(
+                    self.train_dataloader,
+                    self.val_dataloader,
+                    self.device
+                )              
     
     prototype_callback = PrototypeUpdateCallback(
         prototype_update_freq,
-        dm.train_dataloader(),
-        dm.val_dataloader(),
+        train_loader,
+        val_loader,
         device
     )
     
@@ -423,7 +409,8 @@ def main():
         callbacks=[checkpoint_callback, lr_monitor, prototype_callback],
         log_every_n_steps=10,
         logger=logger,
-        check_val_every_n_epoch=1
+        check_val_every_n_epoch=1,
+        reload_dataloaders_every_n_epochs=prototype_update_freq
     )
         
     trainer.fit(epic_trainer)

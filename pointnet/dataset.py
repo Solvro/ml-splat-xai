@@ -214,7 +214,7 @@ class GaussianDataModule(pl.LightningDataModule):
         return DataLoader(
             self.train_ds,
             batch_size=self.hparams.batch_size,
-            shuffle=True,
+            shuffle=False,
             num_workers=self.hparams.num_workers,
             collate_fn=collate_fn,
             drop_last=True,
@@ -225,6 +225,7 @@ class GaussianDataModule(pl.LightningDataModule):
         return DataLoader(
             self.val_ds,
             batch_size=self.hparams.batch_size,
+            shuffle=False,
             num_workers=self.hparams.num_workers,
             collate_fn=collate_fn,
             persistent_workers=True
@@ -234,6 +235,7 @@ class GaussianDataModule(pl.LightningDataModule):
         return DataLoader(
             self.test_ds,
             batch_size=self.hparams.batch_size,
+            shuffle=False,
             num_workers=self.hparams.num_workers,
             collate_fn=collate_fn,
             persistent_workers=True,
