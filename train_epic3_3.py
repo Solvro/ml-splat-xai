@@ -200,7 +200,7 @@ class EpicTrainer(pl.LightningModule):
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             opt,
             T_max=self.max_epochs,   
-            eta_min=5*1e-6             
+            eta_min=1e-5             
         )
         return {
             "optimizer": opt,
@@ -293,8 +293,9 @@ def main():
 
     # pointnet_ckpt = '/kaggle/input/pointnet_wcss/pytorch/default/1/model_wcss_kl_2.ckpt'
     # data_dir = '/kaggle/input/gaussy-sigma/data/data'
-    pointnet_ckpt = '/pointnet_toys_kl_3-5.ckpt'
-    data_dir = '/new_dataset/new_dataset'
+    import os
+    pointnet_ckpt = os.environ.get("POINTNET_CKPT", "/pointnet_toys_kl_3-5.ckpt")
+    data_dir = os.environ.get("DATA_DIR", "/new_dataset/new_dataset")
     batch_size = 4
     num_workers = 4
     epochs = 50
@@ -304,7 +305,9 @@ def main():
     num_samples = 75000
     initial_topk = 50
     final_topk = 5
-    output_dir = "/experiments/"
+    output_dir = os.path.join(os.environ.get("HOME"), "ml-splat-xai", "experiments")
+    os.makedirs(output_dir, exist_ok=True)
+
 
     dm = GaussianDataModule(
         data_dir=data_dir,
