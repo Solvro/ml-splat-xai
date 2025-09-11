@@ -60,9 +60,6 @@ def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device
 
             vals, argidxs = torch.max(point_features, dim=2) 
 
-            batch_idx_ar = torch.arange(B, device=device).unsqueeze(1) 
-            current_inds = dataset_indices[batch_idx_ar, argidxs] 
-
             min_top_acts, _ = torch.min(top_acts, dim=0) # (C,)
             update_mask = vals > min_top_acts
     

@@ -22,24 +22,55 @@ def sigmoid(x):
     return 1 / (1 + np.exp(-x))
 
 def prepare_gaussian_cloud(pts: np.ndarray) -> tuple[np.ndarray]:
-    from sklearn.preprocessing import normalize
+
+    pts[:, 10] = sigmoid(pts[:, 10])
+    mask = pts[:, 10] >= 0.003
+    pts = pts[mask]
+
+    if pts.shape[0] == 0:
+        return (np.zeros((0, 8), dtype=np.float32),
+                np.zeros((0, 3), dtype=np.float32),
+                np.zeros(3, dtype=np.float32),
+                np.zeros(3, dtype=np.float32))
+
+    q = pts[:, 6:10]
+    q_norm = np.linalg.norm(q, axis=1, keepdims=True) + 1e-8
+    pts[:, 6:10] = q / q_norm
+
+    pts[:, 3:6] = normalize(pts[:, 3:6])
+
     xyz = pts[:, :3]
     gauss = pts[:, 3:]
-
-    q = gauss[:, 3:7]
-    q_norm = np.linalg.norm(q, axis=1, keepdims=True) + 1e-8
-    gauss[:, 3:7] = q / q_norm
-
-    gauss[:, :3] = normalize(gauss[:, :3])
-
-    gauss[:, 7] = sigmoid(gauss[:, 7])
-
-    xyz_normalized = normalize(xyz, axis=1)  # change normlaization
 
     xyz_min = xyz.min(axis=0)
     xyz_max = xyz.max(axis=0)
 
-    return pts, xyz_normalized.astype(np.float32), xyz_min, xyz_max
+    return gauss.astype(np.float32), xyz.astype(np.float32), xyz_min, xyz_max
+
+
+
+
+# OLD FUNCTION
+# def prepare_gaussian_cloud(pts: np.ndarray) -> tuple[np.ndarray]:
+#     from sklearn.preprocessing import normalize
+#     xyz = pts[:, :3]
+#     gauss = pts[:, 3:]
+
+#     q = gauss[:, 3:7]
+#     q_norm = np.linalg.norm(q, axis=1, keepdims=True) + 1e-8
+#     gauss[:, 3:7] = q / q_norm
+
+#     gauss[:, :3] = normalize(gauss[:, :3])
+
+#     gauss[:, 7] = sigmoid(gauss[:, 7])
+
+#     xyz_normalized = normalize(xyz, axis=1)  # change normlaization
+
+#     xyz_min = xyz.min(axis=0)
+#     xyz_max = xyz.max(axis=0)
+
+#     return pts, xyz_normalized.astype(np.float32), xyz_min, xyz_max
+
 
 class GaussianPointCloud(Dataset):
     def __init__(
@@ -69,7 +100,8 @@ class GaussianPointCloud(Dataset):
             class_to_idx[class_name] = len(class_to_idx)
             self.classes.append(class_name)
             for ply_path in class_dir.glob("*.ply"):
-                self.files.append((ply_path, class_to_idx[class_name]))
+                self.files.append((ply_path.resolve(), class_to_idx[class_name]))
+
 
     @staticmethod
     def _read_ply(path: Path) -> np.ndarray:
@@ -102,22 +134,35 @@ class GaussianPointCloud(Dataset):
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         path, label = self.files[idx]
         pts = self._read_ply(path)
-        indices = np.arange(pts.shape[0])
 
         if self.sampling_method != "original_size":
             indices = self._sample_index(pts)
             pts = pts[indices]
 
         gauss, xyz_normalized, xyz_min, xyz_max = prepare_gaussian_cloud(pts)
-        gauss = torch.from_numpy(pts).float()
+        if gauss.shape[0] == 0:
+            gauss = torch.zeros((1, 11), dtype=torch.float32)
+            xyz_normalized = torch.zeros((1, xyz_normalized.shape[1]), dtype=torch.float32)
+            indices = torch.arange(gauss.shape[0])
+            return {
+            "gauss": gauss,
+            "xyz_normalized": xyz_normalized,
+            "label": torch.tensor(label, dtype=torch.long),
+            "indices": indices,
+        }
+
+                
+        gauss = torch.from_numpy(gauss)
+        xyz_normalized = torch.from_numpy(xyz_normalized)
+        gauss = torch.cat([xyz_normalized, gauss], dim=1)
+        indices = torch.arange(gauss.shape[0])
         
         return {
             "gauss": gauss,
-            "xyz_normalized": torch.from_numpy(xyz_normalized).float(),
+            "xyz_normalized": xyz_normalized,
             "label": torch.tensor(label, dtype=torch.long),
-            "indices": torch.from_numpy(indices).long(),
+            "indices": indices,
         }
-
 
 def collate_fn(batch):
     max_points = max(item["gauss"].shape[0] for item in batch)
@@ -127,6 +172,8 @@ def collate_fn(batch):
     padded_indices = []
     labels = []
     masks = []
+    from sklearn.preprocessing import normalize
+
 
     for item in batch:
         features = item["gauss"]
@@ -139,7 +186,7 @@ def collate_fn(batch):
         masks.append(mask)
 
         padding_size = max_points - num_points
-        
+            
         if padding_size > 0:
             feature_padding = torch.zeros((padding_size, features.shape[1]), dtype=features.dtype)
             features = torch.cat([features, feature_padding], dim=0)
