@@ -1,3 +1,4 @@
+from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
 from einops import rearrange
 import os
@@ -13,7 +14,7 @@ from plyfile import PlyData, PlyElement
 import matplotlib.pyplot as plt
 
 from pointnet.pointnet import PointNetLightning
-from pointnet.dataset import GaussianDataModule, FEATURE_NAMES, collate_fn
+from pointnet.dataset import GaussianDataModule, FEATURE_NAMES, collate_fn, prepare_gaussian_cloud
 from pointnet.epic import EpicDisentangler
 
 
@@ -223,6 +224,59 @@ class EpicTrainer(pl.LightningModule):
     def val_dataloader(self):
         print("Get val_loader")
         return self.val_prototypes_loader
+    
+    def test_step(self, batch, batch_idx):
+        self.pointnet.eval()
+        features = batch["gauss"]
+        xyz_normalized = batch["xyz_normalized"]
+        mask = batch.get("mask", None)
+        channels = batch["channel"]
+
+        with torch.no_grad():
+            point_features, xyz_for_vox = self.pointnet.extract_point_features(features, xyz_normalized, mask)
+
+        point_features = self.epic(point_features)
+        voxel_features, indices_vox, point_counts = self.pointnet.voxel_agg(point_features, xyz_for_vox, mask)
+
+        voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1)
+        voxel_features_flat = F.relu(voxel_features_flat)
+
+        purity = purity_argmax_voxel(voxel_features_flat, channels)
+        loss = -purity.mean()
+
+        self.log("test/purity_mean", purity.mean(), prog_bar=True)
+        self.log("test/epic_purity_loss", loss, prog_bar=True)
+        return loss
+    
+    def test_dataloader(self):
+        return self.test_prototypes_loader
+    
+    @torch.no_grad()
+    def update_test_prototypes(self, test_loader, n_prototypes, batch_size, num_workers, device):
+        U = self.epic.get_weight().to(device)
+
+        print(f"Generating {n_prototypes} prototypes per channel...")
+        test_dataset = test_loader.dataset
+        prototypes = generate_prototypes_pointnet(
+            self.pointnet,
+            test_loader,
+            num_channels=self.hparams.num_channels,
+            topk=n_prototypes,
+            device=device,
+            U=U,
+            debug=True
+        )
+
+        self.last_val_prototypes = prototypes
+        prototypes_dataset = PrototypesDataset(test_dataset, prototypes)
+
+        self.test_prototypes_loader = DataLoader(
+            prototypes_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            collate_fn=collate_prototypes
+        )
 
     @torch.no_grad()
     def update_prototypes(self, train_loader, val_loader, batch_size, num_workers, device):
@@ -310,6 +364,25 @@ class PrototypeUpdateCallback(pl.Callback):
                 self.num_workers,
                 self.device
             )
+            
+
+def load_and_preprocess_ply(ply_path: Path):
+    plydata = PlyData.read(str(ply_path))
+    vertex = plydata["vertex"]
+    pts = np.vstack([vertex[name] for name in FEATURE_NAMES]).T.astype(np.float32)
+
+    gauss, xyz_normalized, xyz_min, xyz_max, mask = prepare_gaussian_cloud(pts)
+    gauss = torch.from_numpy(gauss)
+    xyz_normalized = torch.from_numpy(xyz_normalized)
+    gauss = torch.cat([xyz_normalized, gauss], dim=1)
+
+    return {
+        "pts": pts,
+        "gauss": gauss,
+        "xyz_normalized": xyz_normalized,
+        "xyz_min": xyz_min,
+        "xyz_max": xyz_max
+    }
 
 
 class EpicVisualizationCallback(pl.Callback):
@@ -403,16 +476,12 @@ class EpicVisualizationCallback(pl.Callback):
 
     @staticmethod
     def _read_ply_to_tensors_with_raw(ply_path: str) -> tuple[torch.Tensor, torch.Tensor, np.ndarray, np.ndarray, np.ndarray]:
-        plydata = PlyData.read(ply_path)
-        vertex = plydata["vertex"]
-        data = np.vstack([vertex[name] for name in FEATURE_NAMES]).T.astype(np.float32)
-        pts = torch.from_numpy(data)
-        raw_xyz = data[:, :3].astype(np.float32)
-        raw_min = raw_xyz.min(axis=0)
-        raw_max = raw_xyz.max(axis=0)
-        xyz_norm = (raw_xyz - raw_min) / (raw_max - raw_min + 1e-8)
-        features = pts.t().unsqueeze(0)
-        xyz_norm = torch.from_numpy(xyz_norm).unsqueeze(0)
+        data = load_and_preprocess_ply(Path(ply_path))
+        raw_xyz = data["pts"][:, :3].astype(np.float32)
+        features = data["gauss"].unsqueeze(0).transpose(1, 2)
+        xyz_norm = data["xyz_normalized"].unsqueeze(0)
+        raw_min = data["xyz_min"]
+        raw_max = data["xyz_max"]
         return features, xyz_norm, raw_xyz, raw_min, raw_max
 
     @staticmethod
@@ -577,17 +646,17 @@ class EpicVisualizationCallback(pl.Callback):
 
 
 def main():
-    pointnet_ckpt = 'pointnet_epic_kl_3_5/model_wcss_kl_3-5.ckpt'
-    data_dir = 'data'
+    pointnet_ckpt = 'pointnet_epic_kl_3_5/pointnet_epic_kl_3_5/model_wcss_kl_3-5.ckpt'
+    data_dir = 'data/train'
     batch_size = 4
     num_workers = 2
-    epochs = 75
+    epochs = 8
     lr = 1e-5
-    prototype_update_freq = 3
+    prototype_update_freq = 2
     sampling = "random"
     num_samples = 17500
-    initial_topk = 40
-    final_topk = 5
+    initial_topk = 4
+    final_topk = 1
     output_dir = "blagam_stary_75_epok"
 
     dm = GaussianDataModule(
