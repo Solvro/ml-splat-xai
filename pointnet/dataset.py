@@ -17,29 +17,38 @@ FEATURE_NAMES: list[str] = [
     "rot_0", "rot_1", "rot_2", "rot_3",
     "opacity",
 ]
+OPACITY_THRESHOLD = 0.005
 
 def sigmoid(x):
     return 1 / (1 + np.exp(-x))
 
-
 def prepare_gaussian_cloud(pts: np.ndarray) -> tuple[np.ndarray]:
+
+    pts[:, 10] = sigmoid(pts[:, 10])
+    mask = pts[:, 10] >= OPACITY_THRESHOLD
+    pts = pts[mask]
+
+    if pts.shape[0] == 0:
+        return (np.zeros((0, 8), dtype=np.float32),
+                np.zeros((0, 3), dtype=np.float32),
+                np.zeros(3, dtype=np.float32),
+                np.zeros(3, dtype=np.float32),
+                np.zeros(0, dtype=bool))
+
+    q = pts[:, 6:10]
+    q_norm = np.linalg.norm(q, axis=1, keepdims=True) + 1e-8
+    pts[:, 6:10] = q / q_norm
+    pts[:, 3:6] = normalize(pts[:, 3:6])
+
     xyz = pts[:, :3]
     gauss = pts[:, 3:]
 
-    q = gauss[:, 3:7]
-    q_norm = np.linalg.norm(q, axis=1, keepdims=True) + 1e-8 # normalize quaternion
-    gauss[:, 3:7] = q / q_norm
-
-    gauss[:, :3] = normalize(gauss[:, :3])  # normalize scaling
-    gauss[:, 7] = sigmoid(gauss[:, 7])  # apply sigmoid to opacity
-
-    xyz = pts[:, :3]
     xyz_min = xyz.min(axis=0)
     xyz_max = xyz.max(axis=0)
     xyz_normalized = (xyz - xyz_min) / (xyz_max - xyz_min + 1e-8)
-    gauss = pts
 
-    return gauss, xyz_normalized, xyz_min, xyz_max
+    return gauss.astype(np.float32), xyz_normalized.astype(np.float32), xyz_min, xyz_max, mask
+
 
 class GaussianPointCloud(Dataset):
     def __init__(
@@ -47,7 +56,7 @@ class GaussianPointCloud(Dataset):
         root: Path,
         num_points: int = 2048,
         sampling_method: str | None = "random",  # choices: "random", "fps", "original_size"
-        random_seed: int | None = None 
+        random_seed: int | None = None
     ):
         self.root = Path(root)
         self.num_points = num_points
@@ -60,16 +69,16 @@ class GaussianPointCloud(Dataset):
 
         self.files: list[tuple[Path, int]] = []
         self.classes: list[str] = []
-        class_to_idx = {}
+        self.class_to_idx = {}
 
         for class_dir in sorted(self.root.iterdir()):
             if not class_dir.is_dir():
                 continue
             class_name = class_dir.name
-            class_to_idx[class_name] = len(class_to_idx)
+            self.class_to_idx[class_name] = len(self.class_to_idx)
             self.classes.append(class_name)
             for ply_path in class_dir.glob("*.ply"):
-                self.files.append((ply_path, class_to_idx[class_name]))
+                self.files.append((ply_path, self.class_to_idx[class_name]))
 
     @staticmethod
     def _read_ply(path: Path) -> np.ndarray:
@@ -108,14 +117,16 @@ class GaussianPointCloud(Dataset):
             indices = self._sample_index(pts)
             pts = pts[indices]
 
-        gauss, xyz_normalized, xyz_min, xyz_max = prepare_gaussian_cloud(pts)
-        gauss = torch.from_numpy(pts).float()
+        gauss, xyz_normalized, xyz_min, xyz_max, mask = prepare_gaussian_cloud(pts)
+        gauss = torch.from_numpy(gauss)
+        xyz_normalized = torch.from_numpy(xyz_normalized)
+        gauss = torch.cat([xyz_normalized, gauss], dim=1)
         
         return {
             "gauss": gauss,
-            "xyz_normalized": torch.from_numpy(xyz_normalized).float(),
+            "xyz_normalized": xyz_normalized,
             "label": torch.tensor(label, dtype=torch.long),
-            "indices": torch.from_numpy(indices).long(),
+            "indices": torch.from_numpy(indices[mask]).long(),
         }
 
 
@@ -193,13 +204,13 @@ class GaussianDataModule(pl.LightningDataModule):
             test_path,
             num_points=self.hparams.num_points,
             sampling_method=self.hparams.sampling,
-            random_seed=self.hparams.seed
+            random_seed=self.hparams.seed,
         )
         dataset = GaussianPointCloud(
             train_path,
             num_points=self.hparams.num_points,
             sampling_method=self.hparams.sampling,
-            random_seed=self.hparams.seed
+            random_seed=self.hparams.seed,
         )
         self.num_classes = len(dataset.classes)
         n_val = int(len(dataset) * self.hparams.val_split)
