@@ -208,7 +208,7 @@ class EpicTrainer(pl.LightningModule):
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             opt,
             T_max=self.max_epochs,   
-            eta_min=4*1e-5             
+            eta_min=1e-5             
         )
         return {
             "optimizer": opt,
@@ -567,17 +567,16 @@ def main():
     import os
     pointnet_ckpt = os.environ.get("POINTNET_CKPT", "/pointnet_toys_kl_3-5.ckpt")
     data_dir = os.environ.get("DATA_DIR", "/new_dataset/new_dataset")
-    resume_ckpt = os.environ.get("CKPT", None)
     batch_size = 4
     num_workers = 4
-    epochs = 30
+    epochs = 2
     lr = 1e-4 
     prototype_update_freq = 2
-    sampling = "original_size"
-    num_samples = 75000
-    initial_topk = 15
-    final_topk = 3
-    output_dir = os.path.join(os.environ.get("HOME"), "ml-splat-xai", "30_epochs_30_3")
+    sampling = "random"
+    num_samples = 1000
+    initial_topk = 6
+    final_topk = 4
+    output_dir = os.path.join(os.environ.get("HOME"), "ml-splat-xai", "sanity_check")
     os.makedirs(output_dir, exist_ok=True)
 
 
@@ -627,18 +626,18 @@ def main():
     epic_trainer.update_prototypes(train_loader, val_loader, device)
     
     os.makedirs(output_dir, exist_ok=True)
-    
+
     checkpoint_callback = ModelCheckpoint(
         dirpath=output_dir,
-        filename="epic-{epoch:02d}-{val/epic_purity_loss:.4f}",
+        filename="sanity-{epoch:02d}-{val/epic_purity_loss:.4f}",
         monitor="val/epic_purity_loss",
         mode="min",
         save_top_k=3
-    )
+    )    
     
     lr_monitor = LearningRateMonitor(logging_interval="epoch")
     
-    logger = TensorBoardLogger(output_dir, name="epic_logs")
+    logger = TensorBoardLogger(output_dir, name="sanity_logs")
     
 
     class PrototypeUpdateCallback(pl.Callback):
@@ -666,7 +665,7 @@ def main():
     
     epic_viz_cb = EpicVisualizationCallback(
         output_dir=os.path.join(output_dir, "epic_visualizations"),
-        num_channels=15,
+        num_channels=6,
         grid_size=10,
         val_dataset=val_dataset,
         batch_size=batch_size,
@@ -688,14 +687,9 @@ def main():
         num_sanity_val_steps=2
     )
         
-    if resume_ckpt is not None:
-        print(f"Resuming training from checkpoint: {resume_ckpt}")
-        trainer.fit(epic_trainer, ckpt_path=resume_ckpt)
-    else:
-        trainer.fit(epic_trainer)
-
+    trainer.fit(epic_trainer)
     
-    final_matrix = epic_trainer.epic.state_dict()
+    final_matrix = epic_trainer.epic.get_weight()
     torch.save(final_matrix, os.path.join(output_dir, "final_orthogonal_matrix.pt"))
     
     pointnet_model.attach_epic()

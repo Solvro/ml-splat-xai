@@ -24,7 +24,7 @@ def sigmoid(x):
 def prepare_gaussian_cloud(pts: np.ndarray) -> tuple[np.ndarray]:
 
     pts[:, 10] = sigmoid(pts[:, 10])
-    mask = pts[:, 10] >= 0.003
+    mask = pts[:, 10] >= 0.02
     pts = pts[mask]
 
     if pts.shape[0] == 0:
@@ -38,6 +38,7 @@ def prepare_gaussian_cloud(pts: np.ndarray) -> tuple[np.ndarray]:
     pts[:, 6:10] = q / q_norm
 
     pts[:, 3:6] = normalize(pts[:, 3:6])
+    pts[:, :3] = normalize(pts[:, :3])
 
     xyz = pts[:, :3]
     gauss = pts[:, 3:]
