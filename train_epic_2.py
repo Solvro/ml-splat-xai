@@ -273,7 +273,7 @@ class EpicTrainer(pl.LightningModule):
         self.test_prototypes_loader = DataLoader(
             prototypes_dataset,
             batch_size=batch_size,
-            shuffle=True,
+            shuffle=False,
             num_workers=num_workers,
             collate_fn=collate_prototypes
         )
@@ -456,17 +456,24 @@ class EpicVisualizationCallback(pl.Callback):
             for name in field_names:
                 new_vertices[name] = vertices[name]
 
-            pink = (1.0, 0.75, 0.8)
+            red = (1.0, 0.0, 0.0)
+            gray = (0.5, 0.5, 0.5)
 
             ids = np.array([i for i in highlight_vertex_ids if 0 <= i < n], dtype=np.int64)
-            if ids.size > 0:
-                new_vertices["f_dc_0"][ids] = pink[0]
-                new_vertices["f_dc_1"][ids] = pink[1]
-                new_vertices["f_dc_2"][ids] = pink[2]
-                for j in range(45):
-                    nm = f"f_rest_{j}"
-                    if nm in field_names:
-                        new_vertices[nm][ids] = 0.0
+
+            def highlight_color(ids, color):
+                nonlocal new_vertices
+                if ids.size > 0:
+                    new_vertices["f_dc_0"][ids] = color[0]
+                    new_vertices["f_dc_1"][ids] = color[1]
+                    new_vertices["f_dc_2"][ids] = color[2]
+                    for j in range(45):
+                        nm = f"f_rest_{j}"
+                        if nm in field_names:
+                            new_vertices[nm][ids] = 0.0
+
+            highlight_color(ids, red)
+            highlight_color(np.setdiff1d(np.arange(n), ids), gray)
 
             PlyData([PlyElement.describe(new_vertices, "vertex")], text=False).write(output_path)
             return True
@@ -515,15 +522,16 @@ class EpicVisualizationCallback(pl.Callback):
         ], dtype=np.float32)
         return corners
 
-    def _plot_panels_points(self, panels, title, out_path, isolated=False):
+    def _plot_panels_points(self, panels, title, out_path, isolated=False, is_first_explained=False):
         fig = plt.figure(figsize=(4*len(panels), 4))
         edges = [
             (0,1),(0,2),(1,3),(2,3),
             (4,5),(4,6),(5,7),(6,7),
             (0,4),(1,5),(2,6),(3,7)
         ]
-        for j, (xyz_raw, mask_voxel, corners_raw) in enumerate(panels, start=1):
-            ax = fig.add_subplot(1, len(panels), j, projection='3d')
+        index_offset = 0 if is_first_explained else 1
+        for j, (xyz_raw, mask_voxel, corners_raw, ptcl_name) in enumerate(panels, start=index_offset):
+            ax = fig.add_subplot(1, len(panels), j + (1 - index_offset), projection='3d')
             if not isolated:
                 ax.scatter(xyz_raw[:, 0], xyz_raw[:, 1], xyz_raw[:, 2], c='lightgray', s=1, alpha=0.3)
             vox_pts = xyz_raw[mask_voxel]
@@ -532,14 +540,18 @@ class EpicVisualizationCallback(pl.Callback):
             for i_idx, j_idx in edges:
                 xs, ys, zs = corners_raw[[i_idx, j_idx]].T
                 ax.plot(xs, ys, zs, color='gold', lw=1.5, alpha=0.9)
-            ax.set_title(f"rank {j}")
+            ax.set_title(f"target\n{ptcl_name}" if (is_first_explained and j == index_offset) else f"rank {j}\n{ptcl_name}")
             ax.set_box_aspect([1, 1, 1])
         fig.suptitle(title)
         fig.tight_layout()
         fig.savefig(out_path, dpi=160)
         plt.close(fig)
 
-    def visualize_epic_prototypes(self, trainer, pl_module):
+    def get_point_cloud_name(self, ply_path: str):
+        path = Path(ply_path)
+        return path.stem
+
+    def visualize_epic_prototypes(self, trainer, pl_module, is_first_explained=False):
         model = pl_module.pointnet
         device = pl_module.device
         model.eval().to(device)
@@ -603,12 +615,14 @@ class EpicVisualizationCallback(pl.Callback):
                         corners_unit_t, stn_T, rescale_min, rescale_max, ply_min, ply_max
                     )
 
-                    full_panels.append((xyz_raw, mask_voxel, corners_raw))
-                    iso_panels.append((xyz_raw[mask_voxel], np.ones(mask_voxel.sum(), dtype=bool), corners_raw))
+                    ptcl_name = self.get_point_cloud_name(ply_path)
+                    full_panels.append((xyz_raw, mask_voxel, corners_raw, ptcl_name))
+                    iso_panels.append((xyz_raw[mask_voxel], np.ones(mask_voxel.sum(), dtype=bool), corners_raw, ptcl_name))
 
                     highlight_ids = np.nonzero(mask_voxel)[0].tolist()
+                    rank_offset = 0 if is_first_explained else 1
                     try:
-                        full_out = os.path.join(channel_dir, f"rank{rank+1:02d}_full_colored.ply")
+                        full_out = os.path.join(channel_dir, f"rank{rank+rank_offset:02d}_full_colored.ply")
                         ok = self.create_colored_ply(ply_path, full_out, highlight_ids)
                         if not ok:
                             print(f"channel {c} failed to write colored full PLY for rank {rank+1}")
@@ -620,7 +634,7 @@ class EpicVisualizationCallback(pl.Callback):
                                 if safe_ids:
                                     isolated_vertices = plydata["vertex"][safe_ids]
                                     PlyData([PlyElement.describe(isolated_vertices, "vertex")], text=False).write(
-                                        os.path.join(channel_dir, f"rank{rank+1:02d}_isolated_voxel.ply")
+                                        os.path.join(channel_dir, f"rank{rank+rank_offset:02d}_isolated_voxel.ply")
                                     )
                             except Exception as e:
                                 print(f"channel {c} error writing isolated voxel PLY for rank {rank+1}: {e}")
@@ -632,22 +646,25 @@ class EpicVisualizationCallback(pl.Callback):
                     full_panels,
                     title=f"Channel {c} – full cloud (raw space) – points only",
                     out_path=os.path.join(channel_dir, "prototypes_full_3d.png"),
-                    isolated=False
+                    isolated=False, 
+                    is_first_explained=is_first_explained
                 )
             if iso_panels:
                 self._plot_panels_points(
                     iso_panels,
                     title=f"Channel {c} – isolated voxels (raw space) – points only",
                     out_path=os.path.join(channel_dir, "prototypes_isolated_3d.png"),
-                    isolated=True
+                    isolated=True,
+                    is_first_explained=is_first_explained
                 )
 
         print(f"EPIC visualizations saved to {self.output_dir}")
 
 
+
 def main():
-    pointnet_ckpt = 'pointnet_epic_kl_3_5/pointnet_epic_kl_3_5/model_wcss_kl_3-5.ckpt'
-    data_dir = 'data/train'
+    pointnet_ckpt = 'pointnet_toys_kl_3-5.ckpt'
+    data_dir = 'new_dataset'
     batch_size = 4
     num_workers = 2
     epochs = 8
@@ -657,7 +674,7 @@ def main():
     num_samples = 17500
     initial_topk = 4
     final_topk = 1
-    output_dir = "blagam_stary_75_epok"
+    output_dir = "toys_pointnet"
 
     dm = GaussianDataModule(
         data_dir=data_dir,
@@ -779,6 +796,7 @@ def main():
 
     trainer.fit(epic_trainer)
 
+    # HERE IT SHOULD SAVE THE EXPONENTS ONLY, NOT THE CALCULATED MATRIX
     final_matrix = epic_trainer.epic.get_weight()
     torch.save(final_matrix, os.path.join(output_dir, "final_orthogonal_matrix.pt"))
 
