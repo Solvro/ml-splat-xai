@@ -663,7 +663,8 @@ class EpicVisualizationCallback(pl.Callback):
 
 
 def main():
-    pointnet_ckpt = 'pointnet_toys_kl_3-5.ckpt'
+    pointnet_ckpt = 'final_model_whatever.ckpt'
+    epic_pt = ''
     data_dir = 'new_dataset'
     batch_size = 4
     num_workers = 2
@@ -692,25 +693,42 @@ def main():
     print(f"Training dataset size: {len(train_dataset)}")
     print(f"Validation dataset size: {len(val_dataset)}")
 
-    pl_model = PointNetLightning.load_from_checkpoint(
+    pl_module = PointNetLightning.load_from_checkpoint(
         pointnet_ckpt,
         in_dim=len(FEATURE_NAMES),
         num_classes=dm.num_classes,
-        grid_size=10
+        grid_size=10,
     )
-    pointnet_model = pl_model.model
+    pointnet_model = pl_module.model
     pointnet_model.eval()
 
     epic_trainer = EpicTrainer(
-        pointnet_model,
+        pointnet_model=pl_module.model,
         num_channels=1024,
-        lr=lr,
-        initial_topk=initial_topk,
-        final_topk=final_topk,
-        max_epochs=epochs,
-        point_subset_ratio=1.0,
-        subset_seed=42
+        lr=1e-4,
+        initial_topk=40,
+        final_topk=5,
+        max_epochs=20
     )
+
+    epic_dict = torch.load(epic_pt, map_location=device)
+    epic_dis = EpicDisentangler()
+    epic_dis.load_state_dict(state_dict=epic_dict)
+    
+    pl_module.model.attach_epic(epic_dis)
+    pl_module.model.apply_classifier_compensation()
+
+    checkpoint = torch.load(trainer_ckpt, map_location=device)
+    
+    filtered_state_dict = {}
+    for key, value in checkpoint['state_dict'].items():
+        if not key.startswith('pointnet.epic.'):
+            filtered_state_dict[key] = value
+    
+    epic_trainer.load_state_dict(filtered_state_dict, strict=False)
+    
+    epic_trainer.epic = epic_dis
+
     epic_trainer.hparams.batch_size = batch_size
     epic_trainer.hparams.num_workers = num_workers
 
