@@ -24,8 +24,6 @@ def sigmoid(x):
 def prepare_gaussian_cloud(pts: np.ndarray) -> tuple[np.ndarray]:
 
     pts[:, 10] = sigmoid(pts[:, 10])
-    mask = pts[:, 10] >= 0.02
-    pts = pts[mask]
 
     if pts.shape[0] == 0:
         return (np.zeros((0, 8), dtype=np.float32),
@@ -262,11 +260,12 @@ class GaussianDataModule(pl.LightningDataModule):
         return DataLoader(
             self.train_ds,
             batch_size=self.hparams.batch_size,
-            shuffle=False,
+            shuffle=True,
             num_workers=self.hparams.num_workers,
             collate_fn=collate_fn,
             drop_last=True,
-            persistent_workers=True
+            persistent_workers=True,
+            generator=torch.Generator().manual_seed(self.hparams.seed + 1000)  # Different seed for shuffling
         )
 
     def val_dataloader(self):

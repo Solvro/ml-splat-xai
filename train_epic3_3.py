@@ -53,7 +53,6 @@ def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device
 
             if U is not None:
                 point_features = torch.einsum("cd,bdn->bcn", U, point_features)
-                point_features = F.relu(point_features)
             if mask is not None:
                 mask_exp = mask.unsqueeze(1).expand(B, point_features.size(1), point_features.size(2))
                 point_features = point_features.masked_fill(~mask_exp, float("-inf"))
@@ -85,7 +84,6 @@ def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device
 def purity_argmax_point(feature_map, channels, mask=None):
     B, C, N = feature_map.shape
     device = feature_map.device
-    mask = None # change
 
     if mask is not None: 
         mask_exp = mask.unsqueeze(1).expand(B, C, N)
@@ -208,7 +206,7 @@ class EpicTrainer(pl.LightningModule):
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             opt,
             T_max=self.max_epochs,   
-            eta_min=4*1e-5             
+            eta_min=1e-4             
         )
         return {
             "optimizer": opt,
@@ -566,18 +564,18 @@ def main():
     # data_dir = '/kaggle/input/gaussy-sigma/data/data'
     import os
     pointnet_ckpt = os.environ.get("POINTNET_CKPT", "/pointnet_toys_kl_3-5.ckpt")
-    data_dir = os.environ.get("DATA_DIR", "/new_dataset/new_dataset")
+    data_dir = os.environ.get("DATA_DIR", "/toys")
     resume_ckpt = os.environ.get("CKPT", None)
     batch_size = 4
     num_workers = 4
-    epochs = 30
+    epochs = 24
     lr = 1e-4 
-    prototype_update_freq = 2
+    prototype_update_freq = 4
     sampling = "original_size"
     num_samples = 75000
-    initial_topk = 15
+    initial_topk = 30
     final_topk = 3
-    output_dir = os.path.join(os.environ.get("HOME"), "ml-splat-xai", "30_epochs_30_3")
+    output_dir = os.path.join(os.environ.get("HOME"), "ml-splat-xai", "24_epochs_30_3_s")
     os.makedirs(output_dir, exist_ok=True)
 
 
@@ -666,7 +664,7 @@ def main():
     
     epic_viz_cb = EpicVisualizationCallback(
         output_dir=os.path.join(output_dir, "epic_visualizations"),
-        num_channels=15,
+        num_channels=8,
         grid_size=10,
         val_dataset=val_dataset,
         batch_size=batch_size,
