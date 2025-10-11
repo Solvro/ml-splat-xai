@@ -24,7 +24,7 @@ from pointnet.dataset import GaussianDataModule, FEATURE_NAMES, collate_fn
 from pointnet.epic import EpicDisentangler
 
 
-def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device="cpu", U=None):
+def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device="cpu", U=None, debug=False):
     model.eval()
     model.to(device)
     if U is not None:
@@ -221,6 +221,59 @@ class EpicTrainer(pl.LightningModule):
 
     def val_dataloader(self):
         return self.val_prototypes_loader
+
+    def test_step(self, batch, batch_idx):
+        self.pointnet.eval()
+        features = batch["gauss"]
+        xyz_normalized = batch["xyz_normalized"]
+        mask = batch.get("mask", None)
+        channels = batch["channel"]
+
+        with torch.no_grad():
+            point_features, xyz_for_vox = self.pointnet.extract_point_features(features, xyz_normalized, mask)
+
+        point_features = self.epic(point_features)
+        voxel_features, indices_vox, point_counts = self.pointnet.voxel_agg(point_features, xyz_for_vox, mask)
+
+        voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1)
+        voxel_features_flat = F.relu(voxel_features_flat)
+
+        purity = purity_argmax_voxel(voxel_features_flat, channels)
+        loss = -purity.mean()
+
+        self.log("test/purity_mean", purity.mean(), prog_bar=True)
+        self.log("test/epic_purity_loss", loss, prog_bar=True)
+        return loss
+    
+    def test_dataloader(self):
+        return self.test_prototypes_loader
+    
+    @torch.no_grad()
+    def update_test_prototypes(self, test_loader, n_prototypes, batch_size, num_workers, device):
+        U = self.epic.get_weight().to(device)
+
+        print(f"Generating {n_prototypes} prototypes per channel...")
+        test_dataset = test_loader.dataset
+        prototypes = generate_prototypes_pointnet(
+            self.pointnet,
+            test_loader,
+            num_channels=self.hparams.num_channels,
+            topk=n_prototypes,
+            device=device,
+            U=U,
+            debug=True
+        )
+
+        self.last_val_prototypes = prototypes
+        prototypes_dataset = PrototypesDataset(test_dataset, prototypes)
+
+        self.test_prototypes_loader = DataLoader(
+            prototypes_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            collate_fn=collate_prototypes
+        )
 
     def update_prototypes(self, train_dataloader, val_dataloader, device):
         progress = min(self.current_epoch / self.max_epochs, 1.0)

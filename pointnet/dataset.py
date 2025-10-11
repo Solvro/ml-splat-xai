@@ -90,16 +90,17 @@ class GaussianPointCloud(Dataset):
 
         self.files: list[tuple[Path, int]] = []
         self.classes: list[str] = []
-        class_to_idx = {}
+        self.class_to_idx: dict[str, int] = {}
 
         for class_dir in sorted(self.root.iterdir()):
             if not class_dir.is_dir():
                 continue
             class_name = class_dir.name
-            class_to_idx[class_name] = len(class_to_idx)
+            self.class_to_idx[class_name] = len(self.class_to_idx)
             self.classes.append(class_name)
             for ply_path in class_dir.glob("*.ply"):
-                self.files.append((ply_path.resolve(), class_to_idx[class_name]))
+                self.files.append((ply_path.resolve(), self.class_to_idx[class_name]))
+
 
 
     @staticmethod
