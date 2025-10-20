@@ -13,13 +13,14 @@ from einops import rearrange
 from plyfile import PlyData
 import torch.nn.functional as F
 
-def topk_active_channels(pointnet_model, ply_path, topk, device):
+def topk_active_channels(pointnet_model, ply_path, ds, topk, device):
     data = load_and_preprocess_ply(ply_path)
-    features = data["gauss"].unsqueeze(0).transpose(1, 2).to(device)
-    xyz_normalized = data["xyz_normalized"].unsqueeze(0).to(device)
+    ids = ds._random_sample(data["pts"])
+    features = data["gauss"][ids].unsqueeze(0).transpose(1, 2).to(device)
+    xyz_normalized = data["xyz_normalized"][ids].unsqueeze(0).to(device)
     mask = data.get("mask", None)
     if mask is not None:
-        mask = mask.to(device)
+        mask = mask[ids].to(device)
 
     voxel_features, _ = pointnet_model.extract_voxel_features(features, xyz_normalized, mask)
     voxel_features_flat = rearrange(voxel_features, 'b c x y z -> b c (x y z)')
@@ -31,13 +32,13 @@ def topk_active_channels(pointnet_model, ply_path, topk, device):
     return channels.tolist()
 
 
-def explain_prediction(epic_trainer, ply_path, topk, device):
+def explain_prediction(epic_trainer, ply_path, ds, topk, device):
     prototypes = getattr(epic_trainer, "last_val_prototypes", None)
     if prototypes is None:
         print("No stored prototypes found")
         prototypes = {}
 
-    channels = topk_active_channels(epic_trainer.pointnet, ply_path, topk, device)
+    channels = topk_active_channels(epic_trainer.pointnet, ply_path, ds, topk, device)
     print(f"Max active channels are {channels}")
     new_prototypes = {c: [-1] for c in channels}
     for c in channels:
@@ -52,22 +53,23 @@ def ammend_dataset_files(dataset, ply_path):
     dataset.files.append((ply_path, dataset.class_to_idx[ply_path.split("/")[-2]])) # add cloud that is being explained
 
 
-def main():
-    ply_path = "new_dataset/test/7/hat_000.ply" # extact path 
-    pointnet_ckpt = "toys_voxelized/pointnet_epic_compensated.pt"
-    data_dir = "new_dataset"
+def main(args):
+    ply_path = args.ply_path
+    pointnet_ckpt = "pointnet_epic_compensated_2.pt"
+    data_dir = "toys_ds_cleaned/train/"
     batch_size = 4
     num_workers = 2
     sampling = "random"
     num_samples = 17500
     num_prototypes = 5
-    output_dir = "./toys-pervoxel-explain/"
+    output_dir = "./toys-epic-visualization-2/"
+    output_dir = os.path.join(output_dir, Path(ply_path).stem)
 
     dm = GaussianDataModule(
         data_dir=data_dir,
         batch_size=batch_size,
         num_workers=num_workers,
-        val_split=0.1,
+        val_split=0.0,
         sampling=sampling,
         num_points=num_samples
     )
@@ -117,7 +119,7 @@ def main():
     )
     
     epic_viz_cb = EpicVisualizationCallback(
-        output_dir=os.path.join(output_dir, "epic_test_visualizations"),
+        output_dir=output_dir,
         num_channels=1024,
         grid_size=10,
         val_dataset=dataset,
@@ -127,10 +129,13 @@ def main():
         num_prototypes=num_prototypes + 1
     )
 
-    explain_prediction(epic_trainer, ply_path, topk=num_prototypes, device=device)
+    explain_prediction(epic_trainer, ply_path, ds=dataset, topk=num_prototypes, device=device)
 
     epic_viz_cb.visualize_epic_prototypes(None, epic_trainer, is_first_explained=True)
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser('Explaining EPIC Pointnet')
+    parser.add_argument('--ply_path', type=str, required=True, help='path of input ply file')
+    args = parser.parse_args()
+    main(args)
