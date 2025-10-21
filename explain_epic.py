@@ -1,3 +1,4 @@
+import json
 import torch
 from pointnet.dataset import FEATURE_NAMES, GaussianDataModule, collate_fn, prepare_gaussian_cloud
 from pointnet.pointnet import PointNetLightning
@@ -50,19 +51,32 @@ def explain_prediction(epic_trainer, ply_path, ds, topk, device):
     epic_trainer.last_val_prototypes = new_prototypes
 
 def ammend_dataset_files(dataset, ply_path):
-    dataset.files.append((ply_path, dataset.class_to_idx[ply_path.split("/")[-2]])) # add cloud that is being explained
+    dataset.files.append((ply_path, dataset.class_to_idx[ply_path.replace("\\", "/").split("/")[-2]])) # add cloud that is being explained
+
+def get_inference_stats(val_prototypes, dataset):
+    info = {channel : {} for channel in val_prototypes}
+    for channel in val_prototypes:
+        info[channel]["samples"] = val_prototypes[channel][1:]
+        info[channel]["classes"] = [dataset.classes[dataset.files[sample_idx][1]] for sample_idx in val_prototypes[channel][1:]]
+    return info 
+
+def save_inference_stats(info, filename):
+    with open(filename, "w") as f:
+        json.dump(info, f, indent=4)
+
 
 
 def main(args):
     ply_path = args.ply_path
-    pointnet_ckpt = "pointnet_epic_compensated_2.pt"
+    pointnet_ckpt = "checkpoints/pointnet_epic_compensated_grid_10.pt"
+    grid_size = 10
     data_dir = "toys_ds_cleaned/train/"
     batch_size = 4
     num_workers = 2
     sampling = "random"
     num_samples = 17500
-    num_prototypes = 5
-    output_dir = "./toys-epic-visualization-2/"
+    num_prototypes = args.num_prototypes
+    output_dir = args.output_path
     output_dir = os.path.join(output_dir, Path(ply_path).stem)
 
     dm = GaussianDataModule(
@@ -84,11 +98,11 @@ def main(args):
     pl_module = PointNetLightning(
         in_dim=len(FEATURE_NAMES),
         num_classes=dm.num_classes,
-        grid_size=10,
+        grid_size=grid_size,
         head_norm=True
     )
     pl_module.model.attach_epic()
-    pl_module.model.load_state_dict(pt_state_dict['pointnet_state_dict']) # ?
+    pl_module.model.load_state_dict(pt_state_dict['pointnet_state_dict'])
     pl_module.eval()
 
     epic_trainer = EpicTrainer(
@@ -121,7 +135,7 @@ def main(args):
     epic_viz_cb = EpicVisualizationCallback(
         output_dir=output_dir,
         num_channels=1024,
-        grid_size=10,
+        grid_size=grid_size,
         val_dataset=dataset,
         batch_size=batch_size,
         num_workers=num_workers,
@@ -130,12 +144,15 @@ def main(args):
     )
 
     explain_prediction(epic_trainer, ply_path, ds=dataset, topk=num_prototypes, device=device)
-
     epic_viz_cb.visualize_epic_prototypes(None, epic_trainer, is_first_explained=True)
+    stats = get_inference_stats(epic_trainer.last_val_prototypes, dataset)
+    save_inference_stats(stats, os.path.join(output_dir, "inference_stats.json"))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser('Explaining EPIC Pointnet')
     parser.add_argument('--ply_path', type=str, required=True, help='path of input ply file')
+    parser.add_argument('--output_path', type=str, default="./epic-visualization/", help='path of output directory')
+    parser.add_argument('--num_prototypes', type=int, default=5, help='number of prototypes to use')
     args = parser.parse_args()
     main(args)

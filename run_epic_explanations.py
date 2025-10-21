@@ -1,39 +1,88 @@
-import subprocess
+import argparse
+import json
 import os
+import subprocess
+from pathlib import Path
+from typing import Dict
 
-ply_files = [
-    "toys_ds_cleaned/test/2/cup_001.ply",
-    "toys_ds_cleaned/test/3/deer_moose_016.ply",
-    "toys_ds_cleaned/test/4/dinosaur_001.ply",
-    "toys_ds_cleaned/test/5/fox_005.ply",
-    "toys_ds_cleaned/test/6/glass_012.ply",
-    "toys_ds_cleaned/test/7/hat_000.ply",
-    "toys_ds_cleaned/test/8/monitor_005.ply",
-    "toys_ds_cleaned/test/9/sofa_000.ply",
-    "toys_ds_cleaned/test/10/tree_001.ply"
-]
+def run_explain(python_exe: str, script: str, ply_path: str, output_path: str, num_prototypes: int) -> subprocess.CompletedProcess:
+    cmd = [python_exe, script, "--ply_path", ply_path, "--output_path", output_path, "--num_prototypes", str(num_prototypes)]
+    return subprocess.run(cmd, capture_output=True, text=True)
 
-epic_script = "./explain_epic.py"  # Adjust if the script is in a different location
-
-def run_epic_explanation(ply_path):
-    try:
-        # Run the LIME_single script with the specified PLY file
-        command = [".venv/Scripts/python.exe", epic_script, "--ply_path", ply_path]
-        process = subprocess.run(command, check=True, capture_output=True, text=True)
-        print(f"Successfully processed: {ply_path}")
-        print(process.stdout)
-    except subprocess.CalledProcessError as e:
-        print(f"Error processing {ply_path}")
-        print(f"Error message: {e.stderr}")
+def collect_stats(explanation_root: Path) -> Dict[str, dict]:
+    merged: Dict[str, dict] = {}
+    for p in explanation_root.rglob("inference_stats.json"):
+        try:
+            with open(p, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:
+            continue
+        # infer filename key from parent folder or from file path
+        # parent name is expected to be the base filename (e.g. cup_001)
+        key = p.parent.name
+        # fallback: use filename without extension if parent is not informative
+        if not key:
+            key = p.stem
+        merged[key] = data
+    return merged
 
 def main():
-    # Process each PLY file in the list
-    for ply_file in ply_files:
-        if os.path.exists(ply_file):
-            print(f"\nProcessing: {ply_file}")
-            run_epic_explanation(ply_file)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data_root", type=str, default="toys_ds_cleaned/test",
+                        help="Root test folder containing subdirectories (1,2,...)")
+    parser.add_argument('--num_prototypes', type=int, default=5, 
+                        help='number of prototypes to use')
+    parser.add_argument("--explanation_root", type=str, default="explanations",
+                        help="Root directory where explanations (per-file dirs) are written")
+    parser.add_argument("--script", type=str, default="./explain_epic.py",
+                        help="Explanation script to run")
+    parser.add_argument("--python_exe", type=str, default=".venv/Scripts/python.exe",
+                        help="Python executable to run the script (Windows path shown)")
+    parser.add_argument("--max_per_dir", type=int, default=5,
+                        help="Max number of files to process per subdirectory")
+    parser.add_argument("--merge_out", type=str, default="merged_inference_stats.json",
+                        help="Output merged JSON file")
+    parser.add_argument("--dry_run", action="store_true")
+    args = parser.parse_args()
+
+    data_root = Path(args.data_root)
+    script = args.script
+    python_exe = args.python_exe
+    num_prototypes = args.num_prototypes
+    explanation_root = Path(args.explanation_root)
+    explanation_root.mkdir(parents=True, exist_ok=True)
+
+    # gather first N .ply files from each subdir
+    to_process = []
+    for sub in sorted(os.listdir(data_root)):
+        subp = data_root / sub
+        if not subp.is_dir():
+            continue
+        ply_files = sorted([f for f in os.listdir(subp) if f.lower().endswith(".ply")])
+        for fname in ply_files[: args.max_per_dir]:
+            to_process.append(str(subp / fname))
+
+    print(f"Found {len(to_process)} files to process (max {args.max_per_dir} per subdir).")
+
+    for ply in to_process:
+        print(f"Processing: {ply}")
+        if args.dry_run:
+            continue
+        res = run_explain(python_exe, script, ply, explanation_root, num_prototypes)
+        if res.returncode != 0:
+            print(f"  Error running script for {ply}:")
+            print(res.stderr)
         else:
-            print(f"File not found: {ply_file}")
+            print(f"  OK: {ply}")
+            # optional: print stdout for debugging
+            # print(res.stdout)
+
+    # after all runs, collect inference_stats.json under explanation_root
+    merged = collect_stats(explanation_root)
+    merge_out = os.path.join(args.explanation_root, args.merge_out)
+    with open(merge_out, "w", encoding="utf-8") as fh:
+        json.dump(merged, fh, indent=2)
+    print(f"Merged {len(merged)} inference_stats.json into {merge_out}")
 
 if __name__ == "__main__":
     main()
