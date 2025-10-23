@@ -2,7 +2,8 @@ import json
 import torch
 from pointnet.dataset import FEATURE_NAMES, GaussianDataModule, collate_fn, prepare_gaussian_cloud
 from pointnet.pointnet import PointNetLightning
-from train_epic_2 import EpicTrainer, EpicVisualizationCallback, load_and_preprocess_ply
+from train_epic_dislocated import EpicTrainer
+from train_epic import EpicVisualizationCallback, load_and_preprocess_ply
 from torch.utils.data import Dataset, DataLoader
 import argparse
 import os
