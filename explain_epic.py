@@ -15,9 +15,9 @@ from einops import rearrange
 from plyfile import PlyData
 import torch.nn.functional as F
 
-def topk_active_channels(epic_trainer, ply_path, ds, topk, device):
+def topk_active_channels(epic_trainer, ply_path, ds, topk, device, do_sample=False):
     data = load_and_preprocess_ply(ply_path)
-    ids = ds._random_sample(data["pts"])
+    ids = ds._random_sample(data["pts"]) if do_sample else np.arange(data["pts"].shape[0])
     features = data["gauss"][ids].unsqueeze(0).transpose(1, 2).to(device)
     xyz_normalized = data["xyz_normalized"][ids].unsqueeze(0).to(device)
     mask = data.get("mask", None)
@@ -80,6 +80,7 @@ def main(args):
     data_dir = args.data_dir
     batch_size = 4
     num_workers = 2
+    do_sample = False # if True then explained point cloud is sampled
     sampling = "random"
     num_samples = 17500
     save_viz = args.save_viz
@@ -168,8 +169,5 @@ if __name__ == "__main__":
     parser.add_argument('--num_prototypes', type=int, default=5, help='number of prototypes to use')
     parser.add_argument('--data_dir', type=str, default='./data/toys_ds_cleaned/train', help='directory of samples to choose from')
     parser.add_argument('--save_viz', action='store_true', default=False, help='Save point cloud visualizations')
-    # parser.add_argument('--ply_path', type=str, default='./toys_ds_cleaned/test/9/sofa_000.ply', help='path of input ply file')
-    # parser.add_argument('--output_path', type=str, default="./epic-visualization-test/", help='path of output directory')
-    # parser.add_argument('--num_prototypes', type=int, default=5, help='number of prototypes to use')
     args = parser.parse_args()
     main(args)
