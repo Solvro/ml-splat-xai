@@ -5,8 +5,10 @@ import subprocess
 from pathlib import Path
 from typing import Dict
 
-def run_explain(python_exe: str, script: str, ply_path: str, output_path: str, num_prototypes: int) -> subprocess.CompletedProcess:
-    cmd = [python_exe, script, "--ply_path", ply_path, "--output_path", output_path, "--num_prototypes", str(num_prototypes)]
+def run_explain(python_exe: str, script: str, ply_path: str, output_path: str, num_prototypes: int, data_dir: str, save_viz: bool = False) -> subprocess.CompletedProcess:
+    cmd = [python_exe, script, "--ply_path", ply_path, "--output_path", output_path, "--num_prototypes", str(num_prototypes), "--data_dir", data_dir]
+    if save_viz:
+        cmd.append("--save_viz")
     return subprocess.run(cmd, capture_output=True, text=True)
 
 def collect_stats(explanation_root: Path) -> Dict[str, dict]:
@@ -28,12 +30,16 @@ def collect_stats(explanation_root: Path) -> Dict[str, dict]:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_root", type=str, default="toys_ds_cleaned/test",
+    parser.add_argument("--data_root", type=str, default="./data/toys_ds_cleaned/test",
                         help="Root test folder containing subdirectories (1,2,...)")
     parser.add_argument('--num_prototypes', type=int, default=5, 
                         help='number of prototypes to use')
+    parser.add_argument('--data_dir', type=str, default='./data/toys_ds_cleaned/train', 
+                        help='directory of samples to choose from')
     parser.add_argument("--explanation_root", type=str, default="explanations",
                         help="Root directory where explanations (per-file dirs) are written")
+    parser.add_argument('--save_viz', action='store_true', default=False, 
+                        help='Save point cloud visualizations')
     parser.add_argument("--script", type=str, default="./explain_epic.py",
                         help="Explanation script to run")
     parser.add_argument("--python_exe", type=str, default=".venv/Scripts/python.exe",
@@ -49,6 +55,8 @@ def main():
     script = args.script
     python_exe = args.python_exe
     num_prototypes = args.num_prototypes
+    data_dir = args.data_dir
+    save_viz = args.save_viz
     explanation_root = Path(args.explanation_root)
     explanation_root.mkdir(parents=True, exist_ok=True)
 
@@ -68,7 +76,7 @@ def main():
         print(f"Processing: {ply}")
         if args.dry_run:
             continue
-        res = run_explain(python_exe, script, ply, explanation_root, num_prototypes)
+        res = run_explain(python_exe, script, ply, explanation_root, num_prototypes, data_dir, save_viz)
         if res.returncode != 0:
             print(f"  Error running script for {ply}:")
             print(res.stderr)
