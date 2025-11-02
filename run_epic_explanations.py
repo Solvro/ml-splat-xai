@@ -4,6 +4,7 @@ import os
 import subprocess
 from pathlib import Path
 from typing import Dict
+import logging
 
 def run_explain(python_exe: str, script: str, ply_path: str, output_path: str, num_prototypes: int, data_dir: str, save_viz: bool = False) -> subprocess.CompletedProcess:
     cmd = [python_exe, script, "--ply_path", ply_path, "--output_path", output_path, "--num_prototypes", str(num_prototypes), "--data_dir", data_dir]
@@ -30,19 +31,19 @@ def collect_stats(explanation_root: Path) -> Dict[str, dict]:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_root", type=str, default="./data/toys_ds_cleaned/test",
+    parser.add_argument("--data_root", type=str, default="./toys_ds_cleaned/test",
                         help="Root test folder containing subdirectories (1,2,...)")
     parser.add_argument('--num_prototypes', type=int, default=5, 
                         help='number of prototypes to use')
-    parser.add_argument('--data_dir', type=str, default='./data/toys_ds_cleaned/train', 
+    parser.add_argument('--data_dir', type=str, default='./toys_ds_cleaned/train', 
                         help='directory of samples to choose from')
-    parser.add_argument("--explanation_root", type=str, default="explanations",
+    parser.add_argument("--explanation_root", type=str, default="explanations10_new_results",
                         help="Root directory where explanations (per-file dirs) are written")
-    parser.add_argument('--save_viz', action='store_true', default=False, 
+    parser.add_argument('--save_viz', action='store_true', default=True, 
                         help='Save point cloud visualizations')
     parser.add_argument("--script", type=str, default="./explain_epic.py",
                         help="Explanation script to run")
-    parser.add_argument("--python_exe", type=str, default=".venv/Scripts/python.exe",
+    parser.add_argument("--python_exe", type=str, default="python",
                         help="Python executable to run the script (Windows path shown)")
     parser.add_argument("--max_per_dir", type=int, default=5,
                         help="Max number of files to process per subdirectory")
@@ -69,6 +70,7 @@ def main():
         ply_files = sorted([f for f in os.listdir(subp) if f.lower().endswith(".ply")])
         for fname in ply_files[: args.max_per_dir]:
             to_process.append(str(subp / fname))
+            logging.info(str(fname))
 
     print(f"Found {len(to_process)} files to process (max {args.max_per_dir} per subdir).")
 

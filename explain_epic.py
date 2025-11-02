@@ -83,8 +83,8 @@ def main(args):
     batch_size = 4
     num_workers = 2
     do_sample = False # if True then explained point cloud is sampled
-    sampling = "random"
-    num_samples = 17500
+    sampling = "original_size"
+    num_samples = 8192
     save_viz = args.save_viz
     num_prototypes = args.num_prototypes
     output_dir = args.output_path
