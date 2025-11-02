@@ -178,6 +178,7 @@ def main(args):
     data_dir = "data/toys_ds_cleaned/train/"
     channel = None if args.channel < 0 else args.channel
     agg = args.agg
+    cmap_name = args.cmap_name
     ply_output_path = get_path(ply_input_path, channel, agg)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -229,7 +230,9 @@ def main(args):
     )
 
     vf = F.relu(voxel_features_flat.view(1, voxel_features.size(1), -1))   # you already have similar
-    colors, vals = color_points_by_voxel_activation(vf, indices_flat, xyz_raw, channel=channel, agg=agg)    
+    colors, vals = color_points_by_voxel_activation(vf, indices_flat, xyz_raw, channel=channel, agg=agg, cmap_name=cmap_name)    
+
+    np.save(ply_output_path[:-4] + "_vals.npy", vals)
 
     _ = create_colored_ply(
         ply_input_path, ply_output_path, colors

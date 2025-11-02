@@ -40,13 +40,13 @@ def topk_active_channels(epic_trainer, ply_path, ds, topk, device, do_sample=Fal
     return channels.tolist()
 
 
-def explain_prediction(epic_trainer, ply_path, ds, topk, device):
+def explain_prediction(epic_trainer, ply_path, ds, topk, device, do_sample=False):
     prototypes = getattr(epic_trainer, "last_val_prototypes", None)
     if prototypes is None:
         print("No stored prototypes found")
         prototypes = {}
 
-    channels = topk_active_channels(epic_trainer, ply_path, ds, topk, device)
+    channels = topk_active_channels(epic_trainer, ply_path, ds, topk, device, do_sample=do_sample)
     print(f"Max active channels are {channels}")
     new_prototypes = {c: [-1] for c in channels}
     for c in channels:
@@ -80,8 +80,7 @@ def main(args):
     data_dir = args.data_dir
     batch_size = 4
     num_workers = 2
-    do_sample = False # if True then explained point cloud is sampled
-    sampling = "random"
+    do_sample = True # if True then explained point cloud is sampled
     num_samples = 17500
     save_viz = args.save_viz
     num_prototypes = args.num_prototypes
@@ -93,15 +92,12 @@ def main(args):
         batch_size=batch_size,
         num_workers=num_workers,
         val_split=0.0,
-        sampling=sampling,
+        sampling="random" if do_sample else "original_size",
         num_points=num_samples
     )
     dm.setup()
 
     dataset = dm.test_ds
-    ammend_dataset_files(dataset, ply_path)
-
-    print(f"Dataset size: {len(dataset)}")
 
     pt_state_dict = torch.load(pointnet_ckpt)
     pl_module = PointNetLightning(
@@ -154,8 +150,11 @@ def main(args):
         data_dir=data_dir,
         num_prototypes=num_prototypes + 1
     )
+    
+    ammend_dataset_files(dataset, ply_path)
+    print(f"Dataset size: {len(dataset)}")
 
-    explain_prediction(epic_trainer, ply_path, ds=dataset, topk=num_prototypes, device=device)
+    explain_prediction(epic_trainer, ply_path, ds=dataset, topk=num_prototypes, device=device, do_sample=do_sample)
     if save_viz:
         epic_viz_cb.visualize_epic_prototypes(None, epic_trainer, is_first_explained=True)
     stats = get_inference_stats(epic_trainer.last_val_prototypes, dataset)
