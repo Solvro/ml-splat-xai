@@ -15,9 +15,9 @@ import matplotlib.pyplot as plt
 
 from pointnet.pointnet import PointNetLightning
 from pointnet.dataset import GaussianDataModule, FEATURE_NAMES, collate_fn, prepare_gaussian_cloud
-
-
 from pointnet.epic import EpicDisentangler
+
+
 @torch.no_grad()
 def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device="cpu", U=None, debug=False, return_voxels=False):
     model.eval()
@@ -46,16 +46,14 @@ def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device
             print(f"Batch {batch_idx}: Using dataset indices from {dataset_indices[0].item()} to {dataset_indices[-1].item()}")
 
         point_features, xyz_for_vox = model.extract_point_features(features, xyz_normalized, mask)
-
-        if U is not None:
-            point_features = torch.einsum("cd,bdn->bcn", U, point_features)
-
         voxel_features, voxel_indices, point_counts = model.voxel_agg(point_features, xyz_for_vox, mask)
-
         voxel_mask = (point_counts.squeeze(1) > 0)  # (B, V)
         voxel_features_flat = rearrange(voxel_features, 'b c x y z -> b c (x y z)')
-        voxel_features_flat = F.relu(voxel_features_flat)
 
+        if U is not None:
+            voxel_features_flat = torch.einsum("cd,bdn->bcn", U, voxel_features_flat)
+
+        voxel_features_flat = F.relu(voxel_features_flat)
         voxel_features_flat = voxel_features_flat.masked_fill(
             ~voxel_mask.unsqueeze(1).expand_as(voxel_features_flat),
             -float("inf")
@@ -149,7 +147,7 @@ class EpicTrainer(pl.LightningModule):
     def __init__(
         self,
         pointnet_model,
-        num_channels=1024,
+        num_channels=256,
         lr: float = 1e-4,
         initial_topk=40,
         final_topk=5,
@@ -188,7 +186,7 @@ class EpicTrainer(pl.LightningModule):
             point_features, xyz_for_vox = self.pointnet.extract_point_features(features, xyz_normalized, mask)
             voxel_features, indices_vox, point_counts = self.pointnet.voxel_agg(point_features, xyz_for_vox, mask)
 
-        voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1) # B 1024 1000
+        voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1) # B 256 1000
         voxel_features_flat = self.epic(voxel_features_flat)
         voxel_features_flat = F.relu(voxel_features_flat)
 
@@ -210,7 +208,7 @@ class EpicTrainer(pl.LightningModule):
             point_features, xyz_for_vox = self.pointnet.extract_point_features(features, xyz_normalized, mask)
             voxel_features, indices_vox, point_counts = self.pointnet.voxel_agg(point_features, xyz_for_vox, mask)
 
-        voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1)
+        voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1) # B 256 1000
         voxel_features_flat = self.epic(voxel_features_flat)
         voxel_features_flat = F.relu(voxel_features_flat)
 
@@ -244,7 +242,7 @@ class EpicTrainer(pl.LightningModule):
             point_features, xyz_for_vox = self.pointnet.extract_point_features(features, xyz_normalized, mask)
             voxel_features, indices_vox, point_counts = self.pointnet.voxel_agg(point_features, xyz_for_vox, mask)
 
-        voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1)
+        voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1) # B 256 1000
         voxel_features_flat = self.epic(voxel_features_flat)
         voxel_features_flat = F.relu(voxel_features_flat)
 
@@ -598,7 +596,7 @@ class EpicVisualizationCallback(pl.Callback):
                     voxel_features, indices_flat, _ = model.voxel_agg(point_features, xyz_for_vox)
 
                     voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1)
-                    voxel_features_flat = model.epic(voxel_features_flat)
+                    voxel_features_flat = pl_module.epic(voxel_features_flat)
                     voxel_features_flat = F.relu(voxel_features_flat)
                     voxel_features_flat = voxel_features_flat.squeeze(0)
 
@@ -671,19 +669,20 @@ class EpicVisualizationCallback(pl.Callback):
 
 
 def main():
-    pointnet_ckpt = '/Users/domin/Documents/ml-splat-xai/kl_3-5_grid_7/model.ckpt'
-    data_dir = 'filtered_opacity_toys'
-    batch_size = 4
+    pointnet_ckpt = 'checkpoints/kl_3-5_grid_10_1024-256_downsampled/model.ckpt'
+    data_dir = 'data/toys_ds_cleaned'
+    batch_size = 2
     num_workers = 2
-    epochs = 8
-    lr = 1e-5
+    epochs = 1
+    lr = 1e-3
     prototype_update_freq = 2
     sampling = "random"
-    num_samples = 17500
-    initial_topk = 4
-    final_topk = 1
-    output_dir = "toys_pointnet"
-
+    num_samples = 8192
+    initial_topk = 15
+    final_topk = 3
+    output_dir = "checkpoints/toys_pointnet_epic_265_8192"
+    num_channel = 256
+    grid_size=10
     dm = GaussianDataModule(
         data_dir=data_dir,
         batch_size=batch_size,
@@ -704,14 +703,14 @@ def main():
         pointnet_ckpt,
         in_dim=len(FEATURE_NAMES),
         num_classes=dm.num_classes,
-        grid_size=10
+        grid_size=grid_size
     )
     pointnet_model = pl_model.model
     pointnet_model.eval()
 
     epic_trainer = EpicTrainer(
         pointnet_model,
-        num_channels=1024,
+        num_channels=num_channel,
         lr=lr,
         initial_topk=initial_topk,
         final_topk=final_topk,
@@ -781,7 +780,7 @@ def main():
     epic_viz_cb = EpicVisualizationCallback(
         output_dir=os.path.join(output_dir, "epic_visualizations"),
         num_channels=6,
-        grid_size=10,
+        grid_size=grid_size,
         val_dataset=val_dataset,
         batch_size=batch_size,
         num_workers=num_workers,
@@ -804,11 +803,10 @@ def main():
 
     trainer.fit(epic_trainer)
 
-    # HERE IT SHOULD SAVE THE EXPONENTS ONLY, NOT THE CALCULATED MATRIX
     final_matrix = epic_trainer.epic.get_weight()
     torch.save(final_matrix, os.path.join(output_dir, "final_orthogonal_matrix.pt"))
 
-    pointnet_model.attach_epic()
+    pointnet_model.attach_epic(num_channel)
     pointnet_model.epic.load_state_dict(epic_trainer.epic.state_dict())
     pointnet_model.apply_classifier_compensation()
 

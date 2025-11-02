@@ -32,21 +32,21 @@ class STN(nn.Module):
             nn.Conv1d(64, 128, 1, bias=False),
             nn.BatchNorm1d(128),
             nn.GELU(),
-            nn.Conv1d(128, 1024, 1, bias=False),
+            nn.Conv1d(128, 256, 1, bias=False),
         )
 
         norm = nn.BatchNorm1d if head_norm else nn.Identity
-        self.norm = norm(1024)
+        self.norm = norm(256)
         self.act = nn.GELU()
 
         self.head = nn.Sequential(
-            nn.Linear(1024, 512, bias=False),
-            norm(512),
+            nn.Linear(256, 128, bias=False),
+            norm(128),
             nn.GELU(),
-            nn.Linear(512, 256, bias=False),
-            norm(256),
+            nn.Linear(128, 64, bias=False),
+            norm(64),
             nn.GELU(),
-            nn.Linear(256, self.out_nd ** 2),
+            nn.Linear(64, self.out_nd ** 2),
         )
 
         self.head[-1].weight.data.zero_()
@@ -95,13 +95,13 @@ class VoxelAggregation(nn.Module):
             voxel_features_sum = torch.zeros(B, D, self.num_voxels, device=features.device, dtype=features.dtype)
             voxel_features_sum.scatter_add_(2, voxel_indices_flat_expanded, features)  # (B, D, V)
 
-            point_counts = point_counts_raw.clamp(min=1).unsqueeze(1)  # (B,1,V)
+            point_counts = point_counts_raw.unsqueeze(1)  # (B,1,V)
             voxel_features = voxel_features_sum / point_counts  # (B, D, V)
 
         else:  # "max"
             voxel_features = torch.zeros(B, D, self.num_voxels, device=features.device, dtype=features.dtype)
             voxel_features.scatter_reduce_(2, voxel_indices_flat_expanded, features, reduce="amax", include_self=False)
-            point_counts = point_counts_raw.clamp(min=1).unsqueeze(1)
+            point_counts = point_counts_raw.unsqueeze(1)
 
         voxel_features_3d = rearrange(voxel_features, "b d (x y z) -> b d x y z", x=G, y=G, z=G)
         return voxel_features_3d, voxel_indices_flat, point_counts
@@ -143,8 +143,8 @@ class PointNetCls(nn.Module):
             nn.Conv1d(64, 128, 1, bias=False),
             nn.BatchNorm1d(128),
             nn.GELU(),
-            nn.Conv1d(128, 1024, 1, bias=False),
-            nn.BatchNorm1d(1024),
+            nn.Conv1d(128, 256, 1, bias=False),
+            nn.BatchNorm1d(256),
         )
 
         self.voxel_agg = VoxelAggregation(grid_size, pooling=pooling)
@@ -152,18 +152,18 @@ class PointNetCls(nn.Module):
 
         norm = nn.LayerNorm if head_norm else nn.Identity
 
-        head_size = 1024
+        head_size = 256
         self.head = nn.Sequential(
             norm(head_size),
             nn.GELU(),
-            nn.Linear(head_size, 512, bias=False),
-            norm(512),
+            nn.Linear(head_size, 128, bias=False),
+            norm(128),
             nn.GELU(),
-            nn.Linear(512, 256, bias=False),
-            norm(256),
+            nn.Linear(128, 64, bias=False),
+            norm(64),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(256, out_dim),
+            nn.Linear(64, out_dim),
         )
 
         self.epic: EpicDisentangler | None = None
@@ -220,13 +220,13 @@ class PointNetCls(nn.Module):
         point_features = self.conv2(x)  # (B, 1024, N)
         xyz_for_vox = rearrange(xyz_transposed, 'b d n -> b n d')
         return point_features, xyz_for_vox
-    
+
     def extract_voxel_features(self, features: torch.Tensor, xyz_normalized: torch.Tensor, mask: torch.Tensor | None = None):
         point_features, xyz_for_vox = self.extract_point_features(features, xyz_normalized, mask)
-        
+
         if self.epic is not None:
             point_features = self.epic(point_features)
-            
+
         voxel_features, indices, point_counts = self.voxel_agg(point_features, xyz_for_vox, mask)
         return voxel_features, xyz_for_vox
 
@@ -252,7 +252,7 @@ class PointNetCls(nn.Module):
         self.last_point_counts = point_counts.detach()
         self.last_indices = indices.detach()
 
-        return logits, voxel_activations_3d, point_counts, indices
+        return logits, global_features, voxel_activations_3d, point_counts, indices
 
 
 class PointNetLightning(pl.LightningModule):
@@ -310,22 +310,45 @@ class PointNetLightning(pl.LightningModule):
             pen = (p * inv_counts).sum(dim=1).mean()
         return pen
 
+    def _calculate_and_log_metrics(self, features, prefix):
+        features = features - features.mean(dim=0, keepdim=True)
+
+        cov_matrix = torch.cov(features.T)
+        eigenvalues = torch.linalg.eigvalsh(cov_matrix)
+        sorted_eigenvalues, _ = torch.sort(eigenvalues, descending=True)
+
+        self.log(f"{prefix}/eigenvalue_max", sorted_eigenvalues[0])
+        self.log(f"{prefix}/eigenvalue_mean", eigenvalues.mean())
+        self.log(f"{prefix}/eigenvalue_min", sorted_eigenvalues[-1])
+
+        try:
+            singular_values = torch.linalg.svdvals(features)
+            singular_values_normalized = singular_values / torch.sum(singular_values)
+            entropy = -torch.sum(singular_values_normalized * torch.log(singular_values_normalized + 1e-8))
+            rankme_score = torch.exp(entropy)
+            self.log(f"{prefix}/rankme", rankme_score)
+        except torch.linalg.LinAlgError:
+            self.log(f"{prefix}/rankme", 0.0)
+
     def training_step(self, batch, batch_idx):
         features, xyz_normalized, labels, mask = batch["gauss"], batch["xyz_normalized"], batch["label"], batch["mask"]
-        logits, voxel_activations, point_counts, _ = self.model(features, xyz_normalized, mask)
+        logits, global_features, voxel_activations, point_counts, _ = self.model(features, xyz_normalized, mask)
         cls_loss = F.cross_entropy(logits, labels)
         pen = self._count_penalty(voxel_activations, point_counts)
         total = cls_loss + self._penalty_weight * pen
         self.train_acc(logits, labels)
+
         self.log("train/classification_loss", cls_loss, on_step=True, on_epoch=True, prog_bar=False)
         self.log("train/count_penalty", pen, on_step=True, on_epoch=True, prog_bar=False)
         self.log("train/total_loss", total, on_step=True, on_epoch=True, prog_bar=True)
         self.log("train_acc", self.train_acc, on_step=True, on_epoch=True, prog_bar=True)
+
+        self._calculate_and_log_metrics(global_features, "train")
         return total
 
     def validation_step(self, batch, batch_idx):
         features, xyz_normalized, labels, mask = batch["gauss"], batch["xyz_normalized"], batch["label"], batch["mask"]
-        logits, voxel_activations, point_counts, _ = self.model(features, xyz_normalized, mask)
+        logits, global_features, voxel_activations, point_counts, _ = self.model(features, xyz_normalized, mask)
         cls_loss = F.cross_entropy(logits, labels)
         pen = self._count_penalty(voxel_activations, point_counts)
         total = cls_loss + self._penalty_weight * pen
@@ -334,15 +357,18 @@ class PointNetLightning(pl.LightningModule):
         self.log("val/count_penalty", pen, on_epoch=True, prog_bar=False)
         self.log("val_loss", total, on_epoch=True, prog_bar=True)
         self.log("val_acc", self.val_acc, on_epoch=True, prog_bar=True)
+        self._calculate_and_log_metrics(global_features, "val")
         return logits
 
     def test_step(self, batch, batch_idx):
         features, xyz_normalized, labels, mask = batch["gauss"], batch["xyz_normalized"], batch["label"], batch["mask"]
-        logits, voxel_activations, point_counts, _ = self.model(features, xyz_normalized, mask)
+        logits, global_features, voxel_activations, point_counts, _ = self.model(features, xyz_normalized, mask)
         cls_loss = F.cross_entropy(logits, labels)
         self.test_acc(logits, labels)
         self.log("test/classification_loss", cls_loss, on_epoch=True, prog_bar=False)
         self.log("test_acc", self.test_acc, on_epoch=True, prog_bar=True)
+
+        self._calculate_and_log_metrics(global_features, "val")
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)

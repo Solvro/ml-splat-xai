@@ -11,6 +11,7 @@ import numpy as np
 from plyfile import PlyData, PlyElement
 from typing import Sequence
 from pathlib import Path 
+import pandas as pd
 
 def color_points_by_voxel_activation(
     voxel_features_flat,
@@ -63,7 +64,13 @@ def color_points_by_voxel_activation(
         else:
             raise ValueError("agg must be one of {'max','mean','sum'}")
 
-    # normalize activations -> 0..1 for colormap
+    pvid = indices_flat
+    if isinstance(pvid, torch.Tensor):
+        pvid = pvid.detach().cpu().numpy()
+    if pvid.ndim == 2 and pvid.shape[0] == 1:
+        pvid = pvid[0]
+    valid_mask = (pvid >= 0) & (pvid < V)
+    voxel_counts = np.bincount(pvid[valid_mask], minlength=V)
     if voxel_vals.size == 0:
         vmin, vmax = 0.0, 1.0
     else:
@@ -71,26 +78,30 @@ def color_points_by_voxel_activation(
         vmax = float(np.nanmax(voxel_vals))
     norm = (voxel_vals - vmin) / (vmax - vmin + eps)
 
+    top10_norm_ids = np.argsort(norm)[-100:][::-1]
+    records = []
+    for idx, vid in enumerate(top10_norm_ids):
+        records.append({
+            "rank": idx,
+            "voxel_id": int(vid),
+            "value": float(voxel_vals[vid]),
+            "norm": float(norm[vid]),
+            "points": int(voxel_counts[vid]),
+        })
+
+    df_top_voxels = pd.DataFrame(records)
+
     cmap = plt.get_cmap(cmap_name)
     voxel_colors = cmap(norm)  # shape (V,4)
 
-    # get per-point voxel ids (ensure 1D numpy array)
-    pvid = indices_flat
-    if isinstance(pvid, torch.Tensor):
-        pvid = pvid.detach().cpu().numpy()
-    if pvid.ndim == 2 and pvid.shape[0] == 1:
-        pvid = pvid[0]
-    # allocate per-point colors
     N = pvid.shape[0]
     colors = np.zeros((N, 4), dtype=float)
-    # mark valid points that map to a voxel index
-    valid = (pvid >= 0) & (pvid < len(voxel_colors))
+    valid = valid_mask
     if valid.any():
         colors[valid] = voxel_colors[pvid[valid]]
-    # invalid points (not assigned to any voxel) -> gray
-    colors[~valid] = (0.6, 0.6, 0.6, 1.0)
+    colors[~valid] = (0.0, 0.0, 0.0, 1.0)  
 
-    return colors, voxel_vals
+    return colors, voxel_vals, df_top_voxels
 
 
 def plot_xyz_colored_by_voxel(xyz_raw, colors, figsize=(6,6), s=6, elev=20, azim=45):
@@ -173,12 +184,14 @@ def get_path(ply_input_path, channel, agg):
 
 def main(args):
     ply_input_path = args.ply_input_path
-    pointnet_ckpt = "checkpoints/toys_pointnet_epic_dislocated_10x10\pointnet_epic_compensated.pt"
-    grid_size = 10
-    data_dir = "data/toys_ds_cleaned/train/"
+    # pointnet_ckpt = "checkpoints/toys_pointnet_epic_dislocated_10x10\pointnet_epic_compensated.pt"
+    pointnet_ckpt = "models_epick/toys_pointnet_epic_dislocated_grid_7_15_to_3/pointnet_epic_compensated.pt"
+
+    
+    grid_size = 7
+    data_dir = "../archive/new_dataset/toys_ds_cleaned/train"
     channel = None if args.channel < 0 else args.channel
     agg = args.agg
-    cmap_name = args.cmap_name
     ply_output_path = get_path(ply_input_path, channel, agg)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -214,7 +227,12 @@ def main(args):
         xyz_normalized = xyz_normalized.to(device)
         point_features, xyz_for_vox = epic_trainer.pointnet.extract_point_features(features, xyz_normalized, mask=None)
         voxel_features, indices_flat, point_counts = epic_trainer.pointnet.voxel_agg(point_features, xyz_for_vox, mask=None)
-
+    voxel_mask = (point_counts.squeeze(1) > 0)
+    print(voxel_mask)
+    print(voxel_mask.shape)
+    print(voxel_mask.sum())
+    print(voxel_mask)
+    print('voxel features shape:', voxel_features.shape)
     voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1)
     voxel_features_flat = epic_trainer.epic(voxel_features_flat)
     voxel_features_flat = F.relu(voxel_features_flat)
@@ -230,10 +248,15 @@ def main(args):
     )
 
     vf = F.relu(voxel_features_flat.view(1, voxel_features.size(1), -1))   # you already have similar
-    colors, vals = color_points_by_voxel_activation(vf, indices_flat, xyz_raw, channel=channel, agg=agg, cmap_name=cmap_name)    
 
-    np.save(ply_output_path[:-4] + "_vals.npy", vals)
+    print(f"Voxel features shape: {vf.shape}")
+    print(f"Indices flat shape: {indices_flat.shape}")
+    print(f"Raw XYZ shape: {xyz_raw.shape}")
+    print(f"Channel: {channel}, Agg: {agg}")
 
+    colors, vals, df_top_voxels = color_points_by_voxel_activation(vf, indices_flat, xyz_raw, channel=channel,cmap_name='rainbow', agg=agg)    
+
+    df_top_voxels.to_csv(ply_output_path.replace(".ply", "_top_voxels.csv"), index=False)
     _ = create_colored_ply(
         ply_input_path, ply_output_path, colors
     )
@@ -245,9 +268,7 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", type=str, help="Path to output directory")
     parser.add_argument("--channel", type=int, default=-1, help="Which channel to explain, -1 if to use agg")
     parser.add_argument("--agg", type=str, default="max", choices=["max", "mean", "sum"], help="How to aggregate channels")
-    parser.add_argument("--cmap_name", type=str, default="Reds", help="Colormap to use")
+    parser.add_argument("--cmap_name", type=str, default="viridis", help="Colormap to use")
     args = parser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
     main(args)
-
-    
