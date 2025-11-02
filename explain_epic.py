@@ -75,7 +75,11 @@ def save_inference_stats(info, filename):
 
 def main(args):
     ply_path = args.ply_path
+<<<<<<< HEAD
     pointnet_ckpt = "checkpoints/toys_pointnet_epic_256_original/pointnet_epic_compensated.pt"
+=======
+    pointnet_ckpt = "models_epick/toys_pointnet_grid_downsampled_10_256_downsampled/pointnet_epic_compensated.pt"
+>>>>>>> d6ab86b (bug fix and the code for correct results)
     # pointnet_ckpt = "models/toys_pointnet_grid_downsampled_10_256_downsampled/pointnet_epic_compensated.pt"
 
     grid_size = 10
@@ -83,8 +87,8 @@ def main(args):
     batch_size = 4
     num_workers = 2
     do_sample = False # if True then explained point cloud is sampled
-    sampling = "random"
-    num_samples = 17500
+    sampling = "original_size"
+    num_samples = 8192
     save_viz = args.save_viz
     num_prototypes = args.num_prototypes
     output_dir = args.output_path
@@ -171,7 +175,11 @@ if __name__ == "__main__":
     parser.add_argument('--ply_path', type=str, required=True, help='path of input ply file')
     parser.add_argument('--output_path', type=str, default="./epic-visualization/", help='path of output directory')
     parser.add_argument('--num_prototypes', type=int, default=5, help='number of prototypes to use')
+<<<<<<< HEAD
     parser.add_argument('--data_dir', type=str, default='data/toys_ds_cleaned/train', help='directory of samples to choose from')
+=======
+    parser.add_argument('--data_dir', type=str, default='../archive/new_dataset/toys_ds_cleaned/train', help='directory of samples to choose from')
+>>>>>>> d6ab86b (bug fix and the code for correct results)
     parser.add_argument('--save_viz', action='store_true', default=False, help='Save point cloud visualizations')
     args = parser.parse_args()
     main(args)
