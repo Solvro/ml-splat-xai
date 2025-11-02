@@ -40,13 +40,13 @@ def topk_active_channels(epic_trainer, ply_path, ds, topk, device, do_sample=Fal
     return channels.tolist()
 
 
-def explain_prediction(epic_trainer, ply_path, ds, topk, device):
+def explain_prediction(epic_trainer, ply_path, ds, topk, device, do_sample = False):
     prototypes = getattr(epic_trainer, "last_val_prototypes", None)
     if prototypes is None:
         print("No stored prototypes found")
         prototypes = {}
 
-    channels = topk_active_channels(epic_trainer, ply_path, ds, topk, device)
+    channels = topk_active_channels(epic_trainer, ply_path, ds, topk, device, do_sample=do_sample)
     print(f"Max active channels are {channels}")
     new_prototypes = {c: [-1] for c in channels}
     for c in channels:
@@ -75,7 +75,7 @@ def save_inference_stats(info, filename):
 
 def main(args):
     ply_path = args.ply_path
-    pointnet_ckpt = "models_epick/toys_pointnet_grid_downsampled_10_256_downsampled/pointnet_epic_compensated.pt"
+    pointnet_ckpt = "checkpoints/toys_pointnet_epic_256_original/pointnet_epic_compensated.pt"
     # pointnet_ckpt = "models/toys_pointnet_grid_downsampled_10_256_downsampled/pointnet_epic_compensated.pt"
 
     grid_size = 10
@@ -159,7 +159,7 @@ def main(args):
         num_prototypes=num_prototypes + 1
     )
 
-    explain_prediction(epic_trainer, ply_path, ds=dataset, topk=num_prototypes, device=device)
+    explain_prediction(epic_trainer, ply_path, ds=dataset, topk=num_prototypes, device=device, do_sample=do_sample)
     if save_viz:
         epic_viz_cb.visualize_epic_prototypes(None, epic_trainer, is_first_explained=True)
     stats = get_inference_stats(epic_trainer.last_val_prototypes, dataset)
@@ -171,7 +171,7 @@ if __name__ == "__main__":
     parser.add_argument('--ply_path', type=str, required=True, help='path of input ply file')
     parser.add_argument('--output_path', type=str, default="./epic-visualization/", help='path of output directory')
     parser.add_argument('--num_prototypes', type=int, default=5, help='number of prototypes to use')
-    parser.add_argument('--data_dir', type=str, default='../archive/new_dataset/toys_ds_cleaned/train', help='directory of samples to choose from')
+    parser.add_argument('--data_dir', type=str, default='data/toys_ds_cleaned/train', help='directory of samples to choose from')
     parser.add_argument('--save_viz', action='store_true', default=False, help='Save point cloud visualizations')
     args = parser.parse_args()
     main(args)

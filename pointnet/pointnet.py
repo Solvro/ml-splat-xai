@@ -95,7 +95,7 @@ class VoxelAggregation(nn.Module):
             voxel_features_sum = torch.zeros(B, D, self.num_voxels, device=features.device, dtype=features.dtype)
             voxel_features_sum.scatter_add_(2, voxel_indices_flat_expanded, features)  # (B, D, V)
 
-            point_counts = point_counts_raw.clamp(min=1).unsqueeze(1)  # (B,1,V)
+            point_counts = point_counts_raw.unsqueeze(1)  # (B,1,V)
             voxel_features = voxel_features_sum / point_counts  # (B, D, V)
 
         else:  # "max"
