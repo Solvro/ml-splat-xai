@@ -75,14 +75,16 @@ def save_inference_stats(info, filename):
 
 def main(args):
     ply_path = args.ply_path
-    pointnet_ckpt = "checkpoints/toys_pointnet_epic_dislocated_10x10/pointnet_epic_compensated.pt"
+    pointnet_ckpt = "models_epick/toys_pointnet_grid_downsampled_10_256_downsampled/pointnet_epic_compensated.pt"
+    # pointnet_ckpt = "models/toys_pointnet_grid_downsampled_10_256_downsampled/pointnet_epic_compensated.pt"
+
     grid_size = 10
     data_dir = args.data_dir
     batch_size = 4
     num_workers = 2
     do_sample = False # if True then explained point cloud is sampled
-    sampling = "random"
-    num_samples = 17500
+    sampling = "original_size"
+    num_samples = 8192
     save_viz = args.save_viz
     num_prototypes = args.num_prototypes
     output_dir = args.output_path
@@ -110,12 +112,14 @@ def main(args):
         grid_size=grid_size,
         head_norm=True
     )
-    pl_module.model.attach_epic()
+    num_channels = 256
+    pl_module.model.attach_epic(num_channels)
     pl_module.model.load_state_dict(pt_state_dict['pointnet_state_dict'])
     pl_module.eval()
 
     epic_trainer = EpicTrainer(
-        pl_module.model
+        pl_module.model,
+        num_channels = num_channels
     )
     print(f"A_raw = {epic_trainer.epic.A_raw}")
     print(f"U = {epic_trainer.epic.get_weight()}")
@@ -146,7 +150,7 @@ def main(args):
     
     epic_viz_cb = EpicVisualizationCallback(
         output_dir=output_dir,
-        num_channels=1024,
+        num_channels=256,
         grid_size=grid_size,
         val_dataset=dataset,
         batch_size=batch_size,
@@ -167,7 +171,7 @@ if __name__ == "__main__":
     parser.add_argument('--ply_path', type=str, required=True, help='path of input ply file')
     parser.add_argument('--output_path', type=str, default="./epic-visualization/", help='path of output directory')
     parser.add_argument('--num_prototypes', type=int, default=5, help='number of prototypes to use')
-    parser.add_argument('--data_dir', type=str, default='./data/toys_ds_cleaned/train', help='directory of samples to choose from')
+    parser.add_argument('--data_dir', type=str, default='../archive/new_dataset/toys_ds_cleaned/train', help='directory of samples to choose from')
     parser.add_argument('--save_viz', action='store_true', default=False, help='Save point cloud visualizations')
     args = parser.parse_args()
     main(args)

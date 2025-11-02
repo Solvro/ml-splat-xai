@@ -15,11 +15,11 @@ import matplotlib.pyplot as plt
 
 from pointnet.pointnet import PointNetLightning
 from pointnet.dataset import GaussianDataModule, FEATURE_NAMES, collate_fn, prepare_gaussian_cloud
-
-
 from pointnet.epic import EpicDisentangler
+
+
 @torch.no_grad()
-def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device="cpu", U=None, debug=False, return_voxels=False):
+def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device="cpu", U=None, debug=False):
     model.eval()
     model.to(device)
     if U is not None:
@@ -27,7 +27,6 @@ def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device
 
     top_acts = torch.full((topk, num_channels), -float("inf"), device=device)
     top_inds = torch.full((topk, num_channels), -1, dtype=torch.long, device=device)
-    top_voxels = torch.full((topk, num_channels), -1, dtype=torch.long, device=device)
 
     total_samples_seen = 0
 
@@ -61,7 +60,7 @@ def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device
             -float("inf")
         )
 
-        max_voxel_activations, voxels_with_max_act = torch.max(voxel_features_flat, dim=2)  # (B, C)
+        max_voxel_activations, _ = torch.max(voxel_features_flat, dim=2)  # (B, C)
 
         min_top_acts, _ = torch.min(top_acts, dim=0) # (C,)
         update_mask = max_voxel_activations > min_top_acts
@@ -70,7 +69,6 @@ def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device
             continue
 
         combined_acts = torch.cat([top_acts, max_voxel_activations], dim=0)   # (topk+B, C)
-        combined_voxels = torch.cat([top_voxels, voxels_with_max_act], dim=0)  # (topk+B, C)
         dataset_idx_exp = dataset_indices.view(B, 1).expand(B, num_channels)  # (B, C)
         combined_inds = torch.cat([top_inds, dataset_idx_exp], dim=0)        # (topk+B, C)
 
@@ -79,14 +77,9 @@ def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device
         vals, idxs = torch.topk(combined_acts[:, channels_to_update], k=topk, dim=0)
 
         top_acts[:, channels_to_update] = vals
-        top_voxels[:, channels_to_update] = combined_voxels[:, channels_to_update][idxs, torch.arange(len(channels_to_update))]
         top_inds[:, channels_to_update] = combined_inds[:, channels_to_update][idxs, torch.arange(len(channels_to_update))]
 
     prototypes_dict = {c: top_inds[:, c].cpu().numpy().tolist() for c in range(num_channels)}
-    if return_voxels:
-        voxels_dict = {c: top_voxels[:, c].cpu().numpy().tolist() for c in range(num_channels)}
-        act_dict = {c: top_acts[:, c].cpu().numpy().tolist() for c in range(num_channels)}
-        return prototypes_dict, voxels_dict, act_dict
     return prototypes_dict
 
 
@@ -149,7 +142,7 @@ class EpicTrainer(pl.LightningModule):
     def __init__(
         self,
         pointnet_model,
-        num_channels=1024,
+        num_channels=256,
         lr: float = 1e-4,
         initial_topk=40,
         final_topk=5,
@@ -163,10 +156,7 @@ class EpicTrainer(pl.LightningModule):
         for p in self.pointnet.parameters():
             p.requires_grad_(False)
 
-        if self.pointnet.epic is None:
-            self.epic = EpicDisentangler(C=num_channels)
-        else:
-            self.epic = self.pointnet.epic 
+        self.epic = EpicDisentangler(C=num_channels)
         self.lr = lr
         self.initial_topk = initial_topk
         self.final_topk = final_topk
@@ -188,7 +178,7 @@ class EpicTrainer(pl.LightningModule):
             point_features, xyz_for_vox = self.pointnet.extract_point_features(features, xyz_normalized, mask)
             voxel_features, indices_vox, point_counts = self.pointnet.voxel_agg(point_features, xyz_for_vox, mask)
 
-        voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1) # B 1024 1000
+        voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1) # B 256 1000
         voxel_features_flat = self.epic(voxel_features_flat)
         voxel_features_flat = F.relu(voxel_features_flat)
 
@@ -210,7 +200,7 @@ class EpicTrainer(pl.LightningModule):
             point_features, xyz_for_vox = self.pointnet.extract_point_features(features, xyz_normalized, mask)
             voxel_features, indices_vox, point_counts = self.pointnet.voxel_agg(point_features, xyz_for_vox, mask)
 
-        voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1)
+        voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1) # B 256 1000
         voxel_features_flat = self.epic(voxel_features_flat)
         voxel_features_flat = F.relu(voxel_features_flat)
 
@@ -244,7 +234,7 @@ class EpicTrainer(pl.LightningModule):
             point_features, xyz_for_vox = self.pointnet.extract_point_features(features, xyz_normalized, mask)
             voxel_features, indices_vox, point_counts = self.pointnet.voxel_agg(point_features, xyz_for_vox, mask)
 
-        voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1)
+        voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1) # B 256 1000
         voxel_features_flat = self.epic(voxel_features_flat)
         voxel_features_flat = F.relu(voxel_features_flat)
 
@@ -259,28 +249,31 @@ class EpicTrainer(pl.LightningModule):
         return self.test_prototypes_loader
 
     @torch.no_grad()
-    def update_test_prototypes(self, test_loader, n_prototypes, batch_size, num_workers, device, debug=False):
+    def update_test_prototypes(self, test_loader, n_prototypes, batch_size, num_workers, device):
         U = self.epic.get_weight().to(device)
 
         print(f"Generating {n_prototypes} prototypes per channel...")
         test_dataset = test_loader.dataset
-        prototypes, voxels, activations = generate_prototypes_pointnet(
+        prototypes = generate_prototypes_pointnet(
             self.pointnet,
             test_loader,
             num_channels=self.hparams.num_channels,
             topk=n_prototypes,
             device=device,
             U=U,
-            debug=True,
-            return_voxels=True
+            debug=True
         )
 
         self.last_val_prototypes = prototypes
-        self.last_val_voxels = voxels 
-        self.last_val_act = activations
-        self.prototypes_dataset = PrototypesDataset(test_dataset, prototypes)
-        self.voxels_dataset = PrototypesDataset(test_dataset, voxels)
+        prototypes_dataset = PrototypesDataset(test_dataset, prototypes)
 
+        self.test_prototypes_loader = DataLoader(
+            prototypes_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            collate_fn=collate_prototypes
+        )
 
     @torch.no_grad()
     def update_prototypes(self, train_loader, val_loader, batch_size, num_workers, device):
@@ -595,14 +588,10 @@ class EpicVisualizationCallback(pl.Callback):
                     full_xyz_norm = full_xyz_norm.to(device)
 
                     point_features, xyz_for_vox = model.extract_point_features(full_features, full_xyz_norm)
+                    point_features = pl_module.epic(point_features)
                     voxel_features, indices_flat, _ = model.voxel_agg(point_features, xyz_for_vox)
 
-                    voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1)
-                    voxel_features_flat = model.epic(voxel_features_flat)
-                    voxel_features_flat = F.relu(voxel_features_flat)
-                    voxel_features_flat = voxel_features_flat.squeeze(0)
-
-                    vf = F.relu(voxel_features_flat.view(1, voxel_features.size(1), -1))
+                    vf = F.relu(voxel_features.view(1, voxel_features.size(1), -1))
                     max_vals, max_idxs = torch.max(vf[:, c, :], dim=1)
                     voxel_idx = int(max_idxs[0].item())
 
@@ -671,19 +660,19 @@ class EpicVisualizationCallback(pl.Callback):
 
 
 def main():
-    pointnet_ckpt = '/Users/domin/Documents/ml-splat-xai/kl_3-5_grid_7/model.ckpt'
-    data_dir = 'filtered_opacity_toys'
-    batch_size = 4
+    pointnet_ckpt = 'models_pointnet/kl_3-5_grid_7_1024-256/kl_3-5_grid_7_1024-256_downsampled/model.ckpt'
+    data_dir = '../archive/new_dataset/toys_ds_cleaned'
+    batch_size = 2
     num_workers = 2
     epochs = 8
-    lr = 1e-5
+    lr = 1e-3
     prototype_update_freq = 2
     sampling = "random"
-    num_samples = 17500
-    initial_topk = 4
-    final_topk = 1
-    output_dir = "toys_pointnet"
-
+    num_samples = 8192
+    initial_topk = 15
+    final_topk = 3
+    output_dir = "test_to_remove"
+    num_channel = 256
     dm = GaussianDataModule(
         data_dir=data_dir,
         batch_size=batch_size,
@@ -704,14 +693,14 @@ def main():
         pointnet_ckpt,
         in_dim=len(FEATURE_NAMES),
         num_classes=dm.num_classes,
-        grid_size=10
+        grid_size=7
     )
     pointnet_model = pl_model.model
     pointnet_model.eval()
 
     epic_trainer = EpicTrainer(
         pointnet_model,
-        num_channels=1024,
+        num_channels=num_channel,
         lr=lr,
         initial_topk=initial_topk,
         final_topk=final_topk,
@@ -781,7 +770,7 @@ def main():
     epic_viz_cb = EpicVisualizationCallback(
         output_dir=os.path.join(output_dir, "epic_visualizations"),
         num_channels=6,
-        grid_size=10,
+        grid_size=7,
         val_dataset=val_dataset,
         batch_size=batch_size,
         num_workers=num_workers,
@@ -808,7 +797,7 @@ def main():
     final_matrix = epic_trainer.epic.get_weight()
     torch.save(final_matrix, os.path.join(output_dir, "final_orthogonal_matrix.pt"))
 
-    pointnet_model.attach_epic()
+    pointnet_model.attach_epic(num_channel)
     pointnet_model.epic.load_state_dict(epic_trainer.epic.state_dict())
     pointnet_model.apply_classifier_compensation()
 
