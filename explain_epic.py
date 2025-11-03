@@ -105,8 +105,6 @@ def main(args):
     dm.setup()
 
     dataset = dm.test_ds
-    ammend_dataset_files(dataset, ply_path)
-
     print(f"Dataset size: {len(dataset)}")
 
     pt_state_dict = torch.load(pointnet_ckpt)
@@ -152,6 +150,7 @@ def main(args):
         device
     )
     
+    ammend_dataset_files(dataset, ply_path)
     epic_viz_cb = EpicVisualizationCallback(
         output_dir=output_dir,
         num_channels=256,
