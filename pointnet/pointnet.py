@@ -18,7 +18,6 @@ def default(val, d):
 
 
 class STN(nn.Module):
-    # spatial transform network (unchanged)
     def __init__(self, in_dim=3, out_nd=None, head_norm=True):
         super().__init__()
         self.in_dim = in_dim
@@ -123,7 +122,6 @@ class PointNetCls(nn.Module):
         super().__init__()
         self.grid_size = grid_size
 
-        # jeśli używamy stn, wyrzucamy inne cechy za xyz
         self.stn_3d = STN(in_dim=3, head_norm=stn_head_norm) if stn_3d else nn.Identity()
 
         self.conv1 = nn.Sequential(
