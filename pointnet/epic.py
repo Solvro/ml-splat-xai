@@ -15,7 +15,7 @@ class EpicDisentangler(nn.Module):
     def forward(self, point_features: torch.Tensor) -> torch.Tensor:
         anti_sym = self.A_raw - self.A_raw.T
         W = torch.matrix_exp(anti_sym)
-        
+
         return torch.einsum("cd,bdn->bcn", W, point_features)
 
     @torch.no_grad()
@@ -29,7 +29,7 @@ class EpicDisentangler(nn.Module):
         anti_sym = self.A_raw - self.A_raw.T
         W = torch.matrix_exp(anti_sym)
         return W.t().detach()
-    
+
     @torch.no_grad()
     def get_grad(self) -> torch.Tensor | None:
         if self.A_raw.grad is not None:
@@ -38,4 +38,3 @@ class EpicDisentangler(nn.Module):
             return W_grad.detach().cpu()
         else:
             return None
-    
