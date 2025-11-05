@@ -111,7 +111,7 @@ class PrototypeVisualizationCallback(pl.Callback):
         cb.set_label("log10(N)")
         fig.tight_layout()
         return fig
-    
+
     def _plot_logits(self, logits: torch.Tensor, title: str):
         logits_np = logits.detach().cpu().numpy()
         fig, ax = plt.subplots(1, 1, figsize=(6, 4), dpi=self.figure_dpi)

@@ -5,8 +5,6 @@ from numpy.random import default_rng
 import torch
 from plyfile import PlyData
 from torch.utils.data import Dataset, DataLoader, random_split
-from pointnet.pointnet2 import exists
-from pointnet.utils import farthest_point_sampling
 import pytorch_lightning as pl
 from sklearn.preprocessing import normalize 
 
@@ -62,9 +60,9 @@ class GaussianPointCloud(Dataset):
         self.num_points = num_points
         self.sampling_method: str | None = sampling_method
         self.random_seed = random_seed
-        self.rng = default_rng(self.random_seed) if exists(self.random_seed) else None 
-        self.pt_generator = torch.Generator() if exists(random_seed) else None  
-        if exists(random_seed):
+        self.rng = default_rng(self.random_seed) if self.random_seed else None 
+        self.pt_generator = torch.Generator() if random_seed else None  
+        if random_seed:
             self.pt_generator.manual_seed(self.random_seed)
 
         self.files: list[tuple[Path, int]] = []
@@ -98,10 +96,6 @@ class GaussianPointCloud(Dataset):
     def _sample_index(self, pts: np.ndarray) -> np.ndarray:
         if self.sampling_method == "random":
             return self._random_sample(pts)
-        elif self.sampling_method == "fps":
-            pts_tensor = torch.from_numpy(pts[:, :3]).float().unsqueeze(0)
-            indices = farthest_point_sampling(pts_tensor, self.num_points, self.pt_generator).squeeze(0)
-            return indices.numpy()
         else:
             raise ValueError(f"Unknown sampling method: {self.sampling_method}")
 
@@ -121,7 +115,7 @@ class GaussianPointCloud(Dataset):
         gauss = torch.from_numpy(gauss)
         xyz_normalized = torch.from_numpy(xyz_normalized)
         gauss = torch.cat([xyz_normalized, gauss], dim=1)
-        
+
         return {
             "gauss": gauss,
             "xyz_normalized": xyz_normalized,
@@ -144,17 +138,17 @@ def collate_fn(batch):
         xyz_normalized = item["xyz_normalized"]
         indices = item["indices"]
         num_points = features.shape[0]
-        
+
         mask = torch.zeros(max_points, dtype=torch.bool)
         mask[:num_points] = True
         masks.append(mask)
 
         padding_size = max_points - num_points
-        
+
         if padding_size > 0:
             feature_padding = torch.zeros((padding_size, features.shape[1]), dtype=features.dtype)
             features = torch.cat([features, feature_padding], dim=0)
-            
+
             xyz_padding = torch.zeros((padding_size, 3), dtype=xyz_normalized.dtype)
             xyz_normalized = torch.cat([xyz_normalized, xyz_padding], dim=0)
 
@@ -171,7 +165,7 @@ def collate_fn(batch):
         "xyz_normalized": torch.stack(padded_xyz_normalized), # (B, N, 3)
         "label": torch.stack(labels),
         "mask": torch.stack(masks), # (B, N)
-        "indices": torch.stack(padded_indices), # (B, N)    
+        "indices": torch.stack(padded_indices), # (B, N)
     }
 
 
