@@ -7,11 +7,12 @@ import torch
 from typing import Sequence
 import torch.nn.functional as F
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping
 from tqdm import tqdm
 import numpy as np
 from plyfile import PlyData, PlyElement
 import matplotlib.pyplot as plt
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from pointnet.pointnet import PointNetLightning
 from pointnet.dataset import GaussianDataModule, FEATURE_NAMES, collate_fn, prepare_gaussian_cloud
@@ -211,7 +212,8 @@ class EpicTrainer(pl.LightningModule):
 
     def configure_optimizers(self):
         opt = torch.optim.Adam(self.epic.parameters(), lr=self.lr)
-        return opt
+        scheduler = CosineAnnealingLR(opt, T_max=self.max_epochs)
+        return [opt], [scheduler]
 
     def train_dataloader(self):
         print("Get train_loader")
@@ -676,6 +678,8 @@ def main():
     output_dir = "checkpoints/toys_pointnet_epic_265_8192"
     num_channel = 256
     grid_size=10
+    early_stopping_patience = 5
+
     dm = GaussianDataModule(
         data_dir=data_dir,
         batch_size=batch_size,
@@ -781,11 +785,18 @@ def main():
         num_prototypes=5
     )
 
+    stopping_callback = EarlyStopping(
+        monitor="val/epic_purity_loss",
+        patience=early_stopping_patience,
+        verbose=True,
+        mode="min",
+    )
+
     trainer = pl.Trainer(
         max_epochs=epochs,
         accelerator="auto",
         devices="auto",
-        callbacks=[checkpoint_callback, lr_monitor, prototype_callback, epic_viz_cb],
+        callbacks=[checkpoint_callback, lr_monitor, prototype_callback, epic_viz_cb, stopping_callback],
         log_every_n_steps=10,
         logger=logger,
         check_val_every_n_epoch=1,

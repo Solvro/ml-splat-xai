@@ -7,11 +7,12 @@ import torch
 from typing import Sequence
 import torch.nn.functional as F
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping
 from tqdm import tqdm
 import numpy as np
 from plyfile import PlyData, PlyElement
 import matplotlib.pyplot as plt
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from pointnet.pointnet import PointNetLightning
 from pointnet.dataset import GaussianDataModule, FEATURE_NAMES, collate_fn, prepare_gaussian_cloud
@@ -215,7 +216,8 @@ class EpicTrainer(pl.LightningModule):
 
     def configure_optimizers(self):
         opt = torch.optim.Adam(self.epic.parameters(), lr=self.lr)
-        return opt
+        scheduler = CosineAnnealingLR(opt, T_max=self.max_epochs)
+        return [opt], [scheduler]
 
     def train_dataloader(self):
         print("Get train_loader")
@@ -224,7 +226,7 @@ class EpicTrainer(pl.LightningModule):
     def val_dataloader(self):
         print("Get val_loader")
         return self.val_prototypes_loader
-    
+
     def test_step(self, batch, batch_idx):
         self.pointnet.eval()
         features = batch["gauss"]
@@ -247,10 +249,10 @@ class EpicTrainer(pl.LightningModule):
         self.log("test/purity_mean", purity.mean(), prog_bar=True)
         self.log("test/epic_purity_loss", loss, prog_bar=True)
         return loss
-    
+
     def test_dataloader(self):
         return self.test_prototypes_loader
-    
+
     @torch.no_grad()
     def update_test_prototypes(self, test_loader, n_prototypes, batch_size, num_workers, device):
         U = self.epic.get_weight().to(device)
@@ -364,7 +366,7 @@ class PrototypeUpdateCallback(pl.Callback):
                 self.num_workers,
                 self.device
             )
-            
+
 
 def load_and_preprocess_ply(ply_path: Path):
     plydata = PlyData.read(str(ply_path))
@@ -661,7 +663,6 @@ class EpicVisualizationCallback(pl.Callback):
         print(f"EPIC visualizations saved to {self.output_dir}")
 
 
-
 def main():
     pointnet_ckpt = 'pointnet_toys_kl_3-5.ckpt'
     data_dir = 'new_dataset'
@@ -675,6 +676,7 @@ def main():
     initial_topk = 4
     final_topk = 1
     output_dir = "toys_pointnet"
+    early_stopping_patience = 5
 
     dm = GaussianDataModule(
         data_dir=data_dir,
@@ -781,11 +783,18 @@ def main():
         num_prototypes=5
     )
 
+    stopping_callback = EarlyStopping(
+        monitor="val/epic_purity_loss",
+        patience=early_stopping_patience,
+        verbose=True,
+        mode="min"
+    )
+
     trainer = pl.Trainer(
         max_epochs=epochs,
         accelerator="auto",
         devices="auto",
-        callbacks=[checkpoint_callback, lr_monitor, prototype_callback, epic_viz_cb],
+        callbacks=[checkpoint_callback, lr_monitor, prototype_callback, epic_viz_cb, stopping_callback],
         log_every_n_steps=10,
         logger=logger,
         check_val_every_n_epoch=1,
