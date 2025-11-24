@@ -155,7 +155,10 @@ class EpicTrainer(pl.LightningModule):
         for p in self.pointnet.parameters():
             p.requires_grad_(False)
 
-        self.epic = EpicDisentangler(C=num_channels)
+        if self.pointnet.epic is None:
+            self.epic = EpicDisentangler(C=num_channels)
+        else:
+            self.epic = self.pointnet.epic 
         self.lr = lr
         self.initial_topk = initial_topk
         self.final_topk = final_topk
