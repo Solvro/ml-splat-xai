@@ -46,28 +46,28 @@ def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device
             print(f"Batch {batch_idx}: Using dataset indices from {dataset_indices[0].item()} to {dataset_indices[-1].item()}")
 
         point_features, xyz_for_vox = model.extract_point_features(features, xyz_normalized, mask)
-        voxel_features, voxel_indices, point_counts = model.voxel_agg(point_features, xyz_for_vox, mask)
+        voxel_features, voxel_indices, point_counts, _, _ = model.voxel_agg(point_features, xyz_for_vox, mask)
         voxel_mask = (point_counts.squeeze(1) > 0)  # (B, V)
         voxel_features_flat = rearrange(voxel_features, 'b c x y z -> b c (x y z)')
 
         if U is not None:
             voxel_features_flat = torch.einsum("cd,bdn->bcn", U, voxel_features_flat)
 
-        voxel_features_flat = F.relu(voxel_features_flat)
         voxel_features_flat = voxel_features_flat.masked_fill(
             ~voxel_mask.unsqueeze(1).expand_as(voxel_features_flat),
-            -float("inf")
+            0.0
         )
 
-        max_voxel_activations, _ = torch.max(voxel_features_flat, dim=2)  # (B, C)
+        # compute_channel_activation(feature_map).sum(dim=2)
+        batch_activations = voxel_features_flat.sum(dim=2)  # (B, C)
 
         min_top_acts, _ = torch.min(top_acts, dim=0) # (C,)
-        update_mask = max_voxel_activations > min_top_acts
+        update_mask = batch_activations > min_top_acts
 
         if not update_mask.any():
             continue
 
-        combined_acts = torch.cat([top_acts, max_voxel_activations], dim=0)   # (topk+B, C)
+        combined_acts = torch.cat([top_acts, batch_activations], dim=0)   # (topk+B, C)
         dataset_idx_exp = dataset_indices.view(B, 1).expand(B, num_channels)  # (B, C)
         combined_inds = torch.cat([top_inds, dataset_idx_exp], dim=0)        # (topk+B, C)
 
@@ -82,18 +82,26 @@ def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device
     return prototypes_dict
 
 
-def purity_argmax_voxel(voxel_features: torch.Tensor, channels: torch.Tensor) -> torch.Tensor:
-    # voxel_features: (B, C, V)
+def purity_argmax_voxel(voxel_features: torch.Tensor, channels: torch.Tensor, voxel_mask: torch.Tensor | None = None) -> torch.Tensor:
     B, C, V = voxel_features.shape
     device = voxel_features.device
 
-    acts_c = voxel_features[torch.arange(B, device=device), channels, :]  # (B, V)
+    if voxel_mask is not None:
+        voxel_features_masked = voxel_features.masked_fill(
+            ~voxel_mask.unsqueeze(1).expand_as(voxel_features),
+            -float("inf")
+        )
+    else:
+        voxel_features_masked = voxel_features
+
+    acts_c = voxel_features_masked[torch.arange(B, device=device), channels, :]  # (B, V)
     max_vals, max_indices = torch.max(acts_c, dim=1)  # (B,)
 
     vectors = voxel_features[torch.arange(B, device=device), :, max_indices]  # (B, C)
     vectors = torch.where(torch.isfinite(vectors), vectors, torch.zeros_like(vectors))
 
     target = vectors[torch.arange(B, device=device), channels]  # (B,)
+
     norms = vectors.norm(dim=1).clamp_min(1e-8)
     purity = target / norms
 
@@ -146,9 +154,7 @@ class EpicTrainer(pl.LightningModule):
         initial_topk=40,
         final_topk=5,
         max_epochs=20,
-        point_subset_ratio: float = 1.0,
-        subset_seed: int | None = None
-    ):
+    ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["pointnet_model"])
         self.pointnet = pointnet_model.eval()
@@ -178,13 +184,14 @@ class EpicTrainer(pl.LightningModule):
 
         with torch.no_grad():
             point_features, xyz_for_vox = self.pointnet.extract_point_features(features, xyz_normalized, mask)
-            voxel_features, indices_vox, point_counts = self.pointnet.voxel_agg(point_features, xyz_for_vox, mask)
+            voxel_features, indices_vox, point_counts, _, _ = self.pointnet.voxel_agg(point_features, xyz_for_vox, mask)
 
-        voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1) # B 256 1000
+        voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1) # (B, C, V)
         voxel_features_flat = self.epic(voxel_features_flat)
-        voxel_features_flat = F.relu(voxel_features_flat)
 
-        purity = purity_argmax_voxel(voxel_features_flat, channels)
+        voxel_mask = (point_counts.squeeze(1) > 0)  # (B, V)
+
+        purity = purity_argmax_voxel(voxel_features_flat, channels, voxel_mask)
         loss = -purity.mean()
 
         self.log("train/purity_mean", purity.mean(), prog_bar=True)
@@ -200,13 +207,14 @@ class EpicTrainer(pl.LightningModule):
 
         with torch.no_grad():
             point_features, xyz_for_vox = self.pointnet.extract_point_features(features, xyz_normalized, mask)
-            voxel_features, indices_vox, point_counts = self.pointnet.voxel_agg(point_features, xyz_for_vox, mask)
+            voxel_features, indices_vox, point_counts, _, _ = self.pointnet.voxel_agg(point_features, xyz_for_vox, mask)
 
-        voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1) # B 256 1000
+        voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1) # (B, C, V)
         voxel_features_flat = self.epic(voxel_features_flat)
-        voxel_features_flat = F.relu(voxel_features_flat)
 
-        purity = purity_argmax_voxel(voxel_features_flat, channels)
+        voxel_mask = (point_counts.squeeze(1) > 0)  # (B, V)
+
+        purity = purity_argmax_voxel(voxel_features_flat, channels, voxel_mask)
         loss = -purity.mean()
 
         self.log("val/purity_mean", purity.mean(), prog_bar=True)
@@ -235,13 +243,14 @@ class EpicTrainer(pl.LightningModule):
 
         with torch.no_grad():
             point_features, xyz_for_vox = self.pointnet.extract_point_features(features, xyz_normalized, mask)
-            voxel_features, indices_vox, point_counts = self.pointnet.voxel_agg(point_features, xyz_for_vox, mask)
+            voxel_features, indices_vox, point_counts, _, _ = self.pointnet.voxel_agg(point_features, xyz_for_vox, mask)
 
-        voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1) # B 256 1000
+        voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1) # (B, C, V)
         voxel_features_flat = self.epic(voxel_features_flat)
-        voxel_features_flat = F.relu(voxel_features_flat)
 
-        purity = purity_argmax_voxel(voxel_features_flat, channels)
+        voxel_mask = (point_counts.squeeze(1) > 0)  # (B, V)
+
+        purity = purity_argmax_voxel(voxel_features_flat, channels, voxel_mask)
         loss = -purity.mean()
 
         self.log("test/purity_mean", purity.mean(), prog_bar=True)
@@ -381,7 +390,7 @@ def load_and_preprocess_ply(ply_path: Path):
         "gauss": gauss,
         "xyz_normalized": xyz_normalized,
         "xyz_min": xyz_min,
-        "xyz_max": xyz_max
+        "xyz_max": xyz_max,
     }
 
 
@@ -487,27 +496,26 @@ class EpicVisualizationCallback(pl.Callback):
         raw_xyz = data["pts"][:, :3].astype(np.float32)
         features = data["gauss"].unsqueeze(0).transpose(1, 2)
         xyz_norm = data["xyz_normalized"].unsqueeze(0)
-        raw_min = data["xyz_min"]
-        raw_max = data["xyz_max"]
-        return features, xyz_norm, raw_xyz, raw_min, raw_max
+        dataset_min = data["xyz_min"]
+        dataset_max = data["xyz_max"]
+        return features, xyz_norm, raw_xyz, dataset_min, dataset_max
 
     @staticmethod
-    def undo_stn_transformation(xyz_unit: torch.Tensor, stn_T: torch.Tensor, rescale_min: torch.Tensor, rescale_max: torch.Tensor) -> torch.Tensor:
-        min_used = rescale_min.permute(0, 2, 1)
-        max_used = rescale_max.permute(0, 2, 1)
-        xyz_rescaled = xyz_unit * (max_used - min_used) + min_used
+    def undo_stn_transformation(xyz_after_stn: torch.Tensor, stn_T: torch.Tensor) -> torch.Tensor:
+        # xyz_after_stn: (B, N, 3)
+        # Returns: (B, N, 3) in [0,1] range
         T_inv = torch.linalg.pinv(stn_T)
-        xyz_bt = xyz_rescaled.transpose(1, 2)
-        xyz_pre_stn = torch.bmm(T_inv, xyz_bt).transpose(1, 2)
+        xyz_bt = xyz_after_stn.transpose(1, 2)  # (B, 3, N)
+        xyz_pre_stn = torch.bmm(T_inv, xyz_bt).transpose(1, 2)  # (B, N, 3)
         return xyz_pre_stn
 
     @staticmethod
-    def unit_to_raw(xyz_unit: torch.Tensor, stn_T: torch.Tensor, rescale_min: torch.Tensor, rescale_max: torch.Tensor,
-                    ply_min: np.ndarray, ply_max: np.ndarray) -> np.ndarray:
-        xyz_pre_stn = EpicVisualizationCallback.undo_stn_transformation(xyz_unit, stn_T, rescale_min, rescale_max)
-        xyz_pre = xyz_pre_stn[0].cpu().numpy()
-        raw = xyz_pre * (ply_max - ply_min)[None, :] + ply_min[None, :]
-        return raw.astype(np.float32)
+    def unit_to_raw(xyz_after_stn: torch.Tensor, stn_T: torch.Tensor, dataset_min: np.ndarray, dataset_max: np.ndarray) -> np.ndarray:
+        xyz_pre_stn = EpicVisualizationCallback.undo_stn_transformation(xyz_after_stn, stn_T)
+        xyz_normalized = xyz_pre_stn[0].cpu().numpy()  # (N, 3)
+
+        xyz_raw = xyz_normalized * (dataset_max - dataset_min) + dataset_min
+        return xyz_raw.astype(np.float32)
 
     def _voxel_corners_unit(self, voxel_idx: int, G: int) -> np.ndarray:
         vx = voxel_idx // (G*G)
@@ -581,7 +589,7 @@ class EpicVisualizationCallback(pl.Callback):
                     continue
 
                 try:
-                    full_features, full_xyz_norm, raw_xyz, ply_min, ply_max = self._read_ply_to_tensors_with_raw(ply_path)
+                    full_features, full_xyz_norm, raw_xyz, dataset_min, dataset_max = self._read_ply_to_tensors_with_raw(ply_path)
                 except Exception as e:
                     print(f"channel {c} Error reading PLY {ply_path}: {e}")
                     continue
@@ -591,32 +599,35 @@ class EpicVisualizationCallback(pl.Callback):
                     full_xyz_norm = full_xyz_norm.to(device)
 
                     point_features, xyz_for_vox = model.extract_point_features(full_features, full_xyz_norm)
-                    voxel_features, indices_flat, _ = model.voxel_agg(point_features, xyz_for_vox)
+                    voxel_features, indices_flat, _, voxel_min, voxel_max = model.voxel_agg(point_features, xyz_for_vox)
 
-                    voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1)
+                    voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1)  # (B, C, V)
                     voxel_features_flat = pl_module.epic(voxel_features_flat)
-                    voxel_features_flat = F.relu(voxel_features_flat)
-                    voxel_features_flat = voxel_features_flat.squeeze(0)
 
-                    vf = F.relu(voxel_features_flat.view(1, voxel_features.size(1), -1))
-                    max_vals, max_idxs = torch.max(vf[:, c, :], dim=1)
+                    # compute_activation_bbox)
+                    channel_activation = voxel_features_flat[:, c, :]  # (B, V)
+                    max_vals, max_idxs = torch.max(channel_activation, dim=1)  # (B,)
                     voxel_idx = int(max_idxs[0].item())
 
                     stn_T = model.last_stn_T if model.last_stn_T is not None else torch.eye(3, device=device).unsqueeze(0)
-                    rescale_min = model.last_rescale_min if model.last_rescale_min is not None else torch.zeros(1,3,1, device=device)
-                    rescale_max = model.last_rescale_max if model.last_rescale_max is not None else torch.ones(1,3,1, device=device)
 
                     xyz_raw = self.unit_to_raw(
-                        xyz_for_vox, stn_T, rescale_min, rescale_max, ply_min, ply_max
+                        xyz_for_vox, stn_T, dataset_min, dataset_max
                     )
 
                     point_voxel_ids = indices_flat[0].detach().cpu().numpy()
                     mask_voxel = (point_voxel_ids == voxel_idx)
 
-                    corners_unit = self._voxel_corners_unit(voxel_idx, self.grid_size)
-                    corners_unit_t = torch.from_numpy(corners_unit).float().unsqueeze(0).to(device)
+                    corners_unit = self._voxel_corners_unit(voxel_idx, self.grid_size)  # (8, 3) in [0,1]
+                    corners_unit_t = torch.from_numpy(corners_unit).float().unsqueeze(0).to(device)  # (1, 8, 3)
+
+                    voxel_min_np = voxel_min[0].cpu().numpy().flatten()  # (B, 3, 1) -> (3,)
+                    voxel_max_np = voxel_max[0].cpu().numpy().flatten()  # (B, 3, 1) -> (3,)
+                    corners_in_voxel_space = corners_unit * (voxel_max_np - voxel_min_np) + voxel_min_np
+                    corners_in_voxel_space_t = torch.from_numpy(corners_in_voxel_space).float().unsqueeze(0).to(device)
+
                     corners_raw = self.unit_to_raw(
-                        corners_unit_t, stn_T, rescale_min, rescale_max, ply_min, ply_max
+                        corners_in_voxel_space_t, stn_T, dataset_min, dataset_max
                     )
 
                     ptcl_name = self.get_point_cloud_name(ply_path)
@@ -648,7 +659,7 @@ class EpicVisualizationCallback(pl.Callback):
             if full_panels:
                 self._plot_panels_points(
                     full_panels,
-                    title=f"Channel {c} – full cloud (raw space) – points only",
+                    title=f"Channel {c} â€“ full cloud (raw space) â€“ points only",
                     out_path=os.path.join(channel_dir, "prototypes_full_3d.png"),
                     isolated=False, 
                     is_first_explained=is_first_explained
@@ -656,7 +667,7 @@ class EpicVisualizationCallback(pl.Callback):
             if iso_panels:
                 self._plot_panels_points(
                     iso_panels,
-                    title=f"Channel {c} – isolated voxels (raw space) – points only",
+                    title=f"Channel {c} â€“ isolated voxels (raw space) â€“ points only",
                     out_path=os.path.join(channel_dir, "prototypes_isolated_3d.png"),
                     isolated=True,
                     is_first_explained=is_first_explained
@@ -665,22 +676,21 @@ class EpicVisualizationCallback(pl.Callback):
         print(f"EPIC visualizations saved to {self.output_dir}")
 
 
-
 def main():
-    pointnet_ckpt = 'checkpoints/kl_3-5_grid_10_1024-256_downsampled/model.ckpt'
-    data_dir = 'data/toys_ds_cleaned'
+    pointnet_ckpt = 'model.ckpt'
+    data_dir = 'data'
     batch_size = 2
     num_workers = 2
     epochs = 1
     lr = 1e-3
     prototype_update_freq = 2
-    sampling = "random"
+    sampling = "original_size"
     num_samples = 8192
     initial_topk = 15
     final_topk = 3
-    output_dir = "checkpoints/toys_pointnet_epic_265_8192"
+    output_dir = "test_test"
     num_channel = 256
-    grid_size=10
+    grid_size=7
     early_stopping_patience = 5
 
     dm = GaussianDataModule(
@@ -715,8 +725,6 @@ def main():
         initial_topk=initial_topk,
         final_topk=final_topk,
         max_epochs=epochs,
-        point_subset_ratio=1.0,
-        subset_seed=42
     )
     epic_trainer.hparams.batch_size = batch_size
     epic_trainer.hparams.num_workers = num_workers

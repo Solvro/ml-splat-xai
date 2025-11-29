@@ -31,15 +31,15 @@ def collect_stats(explanation_root: Path) -> Dict[str, dict]:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_root", type=str, default="./toys_ds_cleaned/test",
+    parser.add_argument("--data_root", type=str, default="./data/test",
                         help="Root test folder containing subdirectories (1,2,...)")
-    parser.add_argument('--num_prototypes', type=int, default=5, 
+    parser.add_argument('--num_prototypes', type=int, default=5,
                         help='number of prototypes to use')
-    parser.add_argument('--data_dir', type=str, default='./toys_ds_cleaned/train', 
+    parser.add_argument('--data_dir', type=str, default='./data/train',
                         help='directory of samples to choose from')
     parser.add_argument("--explanation_root", type=str, default="explanations10_new_results",
                         help="Root directory where explanations (per-file dirs) are written")
-    parser.add_argument('--save_viz', action='store_true', default=True, 
+    parser.add_argument('--save_viz', action='store_true', default=True,
                         help='Save point cloud visualizations')
     parser.add_argument("--script", type=str, default="./explain_epic.py",
                         help="Explanation script to run")
@@ -51,6 +51,8 @@ def main():
                         help="Output merged JSON file")
     parser.add_argument("--dry_run", action="store_true")
     args = parser.parse_args()
+
+    data_root = Path(args.data_root)
 
     data_root = Path(args.data_root)
     script = args.script

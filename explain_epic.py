@@ -3,7 +3,7 @@ import torch
 from pointnet.dataset import FEATURE_NAMES, GaussianDataModule, collate_fn, prepare_gaussian_cloud
 from pointnet.pointnet import PointNetLightning
 from train_epic_dislocated import EpicTrainer
-from train_epic import EpicVisualizationCallback, load_and_preprocess_ply
+from train_epic_dislocated import EpicVisualizationCallback, load_and_preprocess_ply
 from torch.utils.data import Dataset, DataLoader
 import argparse
 import os
@@ -27,16 +27,33 @@ def topk_active_channels(epic_trainer, ply_path, ds, topk, device, do_sample=Fal
 
     with torch.no_grad():
         point_features, xyz_for_vox = epic_trainer.pointnet.extract_point_features(features, xyz_normalized, mask)
-        voxel_features, indices_vox, point_counts = epic_trainer.pointnet.voxel_agg(point_features, xyz_for_vox, mask)
+        voxel_features, indices_vox, point_counts, _, _ = epic_trainer.pointnet.voxel_agg(point_features, xyz_for_vox, mask)
 
-    voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1)
-    voxel_features_flat = epic_trainer.epic(voxel_features_flat)
-    voxel_features_flat = F.relu(voxel_features_flat)
-    voxel_features_flat = voxel_features_flat.squeeze(0)
-    
-    max_voxel_activations, _ = torch.max(voxel_features_flat, dim=-1) # C
-    
-    _, channels = torch.topk(max_voxel_activations, topk)
+        voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1)  # (B, C, V)
+        voxel_features_flat = epic_trainer.epic(voxel_features_flat)
+
+        # classification_head.before_linear()
+        global_features = F.adaptive_avg_pool1d(voxel_features_flat, 1).squeeze(-1)  # (B, C)
+        logits = epic_trainer.pointnet.head(global_features)  # (B, num_classes)
+        predicted_class = logits.argmax(dim=-1).item()
+        print(f"Predicted class: {predicted_class} (logits: {logits[0].cpu().numpy()})")
+
+        classifier_linear = None
+        for m in epic_trainer.pointnet.head:
+            if isinstance(m, torch.nn.Linear):
+                classifier_linear = m
+                break
+
+        if classifier_linear is None:
+            raise ValueError("Could not find Linear layer in classification head")
+
+        class_weights = classifier_linear.weight[predicted_class]  # (C,)
+
+        # topk(class_weights * relu(before_linear(features)))
+        weighted_global_features = class_weights * F.relu(global_features.squeeze(0))  # (C,)
+
+        _, channels = torch.topk(weighted_global_features, topk, largest=True, sorted=True)
+
     return channels.tolist()
 
 
@@ -75,10 +92,9 @@ def save_inference_stats(info, filename):
 
 def main(args):
     ply_path = args.ply_path
-    pointnet_ckpt = "checkpoints/toys_pointnet_epic_256_original/pointnet_epic_compensated.pt"
-    # pointnet_ckpt = "models/toys_pointnet_grid_downsampled_10_256_downsampled/pointnet_epic_compensated.pt"
+    pointnet_ckpt = "pointnet_epic_compensated.pt"
 
-    grid_size = 10
+    grid_size = 7
     data_dir = args.data_dir
     batch_size = 4
     num_workers = 2
@@ -170,7 +186,7 @@ if __name__ == "__main__":
     parser.add_argument('--ply_path', type=str, required=True, help='path of input ply file')
     parser.add_argument('--output_path', type=str, default="./epic-visualization/", help='path of output directory')
     parser.add_argument('--num_prototypes', type=int, default=5, help='number of prototypes to use')
-    parser.add_argument('--data_dir', type=str, default='data/toys_ds_cleaned/train', help='directory of samples to choose from')
-    parser.add_argument('--save_viz', action='store_true', default=False, help='Save point cloud visualizations')
+    parser.add_argument('--data_dir', type=str, default='data/train', help='directory of samples to choose from')
+    parser.add_argument('--save_viz', action='store_true', default=True, help='Save point cloud visualizations')
     args = parser.parse_args()
     main(args)

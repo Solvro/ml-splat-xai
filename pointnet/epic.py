@@ -29,12 +29,3 @@ class EpicDisentangler(nn.Module):
         anti_sym = self.A_raw - self.A_raw.T
         W = torch.matrix_exp(anti_sym)
         return W.t().detach()
-
-    @torch.no_grad()
-    def get_grad(self) -> torch.Tensor | None:
-        if self.A_raw.grad is not None:
-            anti_sym_grad = self.A_raw.grad - self.A_raw.grad.T
-            W_grad = torch.matrix_exp(anti_sym_grad)
-            return W_grad.detach().cpu()
-        else:
-            return None

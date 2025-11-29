@@ -1,6 +1,11 @@
 import torch
 
-def rescale_to_unit_cube(points: torch.Tensor, mask: torch.Tensor | None = None, return_affine: bool = False, keep_aspect: bool = False,):
+def rescale_to_unit_cube(
+    points: torch.Tensor,
+    mask: torch.Tensor | None = None,
+    return_affine: bool = False,
+    keep_aspect: bool = False
+) -> torch.Tensor | tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
     B, D, N = points.shape
 
     if mask is not None:
