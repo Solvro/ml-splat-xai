@@ -121,6 +121,7 @@ class GaussianPointCloud(Dataset):
             "xyz_normalized": xyz_normalized,
             "label": torch.tensor(label, dtype=torch.long),
             "indices": torch.from_numpy(indices[mask]).long(),
+            "sample_idx": torch.tensor(idx, dtype=torch.long),
         }
 
 
@@ -132,6 +133,7 @@ def collate_fn(batch):
     padded_indices = []
     labels = []
     masks = []
+    sample_idxs = []
 
     for item in batch:
         features = item["gauss"]
@@ -159,6 +161,8 @@ def collate_fn(batch):
         padded_xyz_normalized.append(xyz_normalized)
         padded_indices.append(indices)
         labels.append(item["label"])
+        sample_idxs.append(item["sample_idx"])
+
 
     return {
         "gauss": torch.stack(padded_features).transpose(1, 2), # (B, D, N)
@@ -166,6 +170,7 @@ def collate_fn(batch):
         "label": torch.stack(labels),
         "mask": torch.stack(masks), # (B, N)
         "indices": torch.stack(padded_indices), # (B, N)
+        "sample_idx": torch.stack(sample_idxs), # (B,)
     }
 
 

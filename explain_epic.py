@@ -146,7 +146,7 @@ def main(args):
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=False,
+        shuffle=True,
         num_workers=num_workers,
         collate_fn=collate_fn,
         drop_last=False
