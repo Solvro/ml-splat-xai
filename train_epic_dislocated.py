@@ -29,21 +29,17 @@ def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device
     top_acts = torch.full((topk, num_channels), -float("inf"), device=device)
     top_inds = torch.full((topk, num_channels), -1, dtype=torch.long, device=device)
 
-    total_samples_seen = 0
-
     for batch_idx, batch in tqdm(enumerate(dataloader), total=len(dataloader), desc="Generating prototypes"):
         features = batch["gauss"].to(device)
         xyz_normalized = batch["xyz_normalized"].to(device)
         mask = batch.get("mask", None)
         if mask is not None:
             mask = mask.to(device)
+        dataset_indices = batch.get("sample_idx").to(device) # B,
 
         B = features.size(0)
-        dataset_indices = torch.arange(total_samples_seen, total_samples_seen + B, device=device, dtype=torch.long)
-        total_samples_seen += B
-
         if debug and batch_idx == 0:
-            print(f"Batch {batch_idx}: Using dataset indices from {dataset_indices[0].item()} to {dataset_indices[-1].item()}")
+            print(f"Batch {batch_idx}: Using dataset indices {dataset_indices.tolist()}")
 
         point_features, xyz_for_vox = model.extract_point_features(features, xyz_normalized, mask)
         voxel_features, voxel_indices, point_counts, _, _ = model.voxel_agg(point_features, xyz_for_vox, mask)
@@ -133,6 +129,7 @@ class PrototypesDataset(Dataset):
             "mask": data.get("mask", None),
             "indices": data.get("indices", None),
             "label": data.get("label", None),
+            "sample_idx": data.get("sample_idx", None),
             "channel": channel
         }
 
@@ -175,7 +172,7 @@ class EpicTrainer(pl.LightningModule):
 
         self.last_val_prototypes = None
 
-    def training_step(self, batch, batch_idx):
+    def common_step(self, batch, batch_idx):
         self.pointnet.eval()
         features = batch["gauss"]
         xyz_normalized = batch["xyz_normalized"]
@@ -190,7 +187,11 @@ class EpicTrainer(pl.LightningModule):
         voxel_features_flat = self.epic(voxel_features_flat)
 
         voxel_mask = (point_counts.squeeze(1) > 0)  # (B, V)
+        return voxel_features_flat, channels, voxel_mask
 
+
+    def training_step(self, batch, batch_idx):
+        voxel_features_flat, channels, voxel_mask = self.common_step(batch, batch_idx)
         purity = purity_argmax_voxel(voxel_features_flat, channels, voxel_mask)
         loss = -purity.mean()
 
@@ -199,21 +200,7 @@ class EpicTrainer(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        self.pointnet.eval()
-        features = batch["gauss"]
-        xyz_normalized = batch["xyz_normalized"]
-        mask = batch.get("mask", None)
-        channels = batch["channel"]
-
-        with torch.no_grad():
-            point_features, xyz_for_vox = self.pointnet.extract_point_features(features, xyz_normalized, mask)
-            voxel_features, indices_vox, point_counts, _, _ = self.pointnet.voxel_agg(point_features, xyz_for_vox, mask)
-
-        voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1) # (B, C, V)
-        voxel_features_flat = self.epic(voxel_features_flat)
-
-        voxel_mask = (point_counts.squeeze(1) > 0)  # (B, V)
-
+        voxel_features_flat, channels, voxel_mask = self.common_step(batch, batch_idx)
         purity = purity_argmax_voxel(voxel_features_flat, channels, voxel_mask)
         loss = -purity.mean()
 
@@ -235,21 +222,7 @@ class EpicTrainer(pl.LightningModule):
         return self.val_prototypes_loader
 
     def test_step(self, batch, batch_idx):
-        self.pointnet.eval()
-        features = batch["gauss"]
-        xyz_normalized = batch["xyz_normalized"]
-        mask = batch.get("mask", None)
-        channels = batch["channel"]
-
-        with torch.no_grad():
-            point_features, xyz_for_vox = self.pointnet.extract_point_features(features, xyz_normalized, mask)
-            voxel_features, indices_vox, point_counts, _, _ = self.pointnet.voxel_agg(point_features, xyz_for_vox, mask)
-
-        voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1) # (B, C, V)
-        voxel_features_flat = self.epic(voxel_features_flat)
-
-        voxel_mask = (point_counts.squeeze(1) > 0)  # (B, V)
-
+        voxel_features_flat, channels, voxel_mask = self.common_step(batch, batch_idx)
         purity = purity_argmax_voxel(voxel_features_flat, channels, voxel_mask)
         loss = -purity.mean()
 
@@ -734,7 +707,7 @@ def main():
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=False,
+        shuffle=True,
         num_workers=num_workers,
         collate_fn=collate_fn,
         drop_last=False
@@ -743,7 +716,7 @@ def main():
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
-        shuffle=False,
+        shuffle=True,
         num_workers=num_workers,
         collate_fn=collate_fn,
         drop_last=False
