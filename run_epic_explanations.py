@@ -10,7 +10,7 @@ def run_explain(python_exe: str, script: str, ply_path: str, output_path: str, n
     cmd = [python_exe, script, "--ply_path", ply_path, "--output_path", output_path, "--num_prototypes", str(num_prototypes), "--data_dir", data_dir]
     if save_viz:
         cmd.append("--save_viz")
-    return subprocess.run(cmd, capture_output=True, text=True)
+    return subprocess.run(cmd, capture_output=False, text=False)
 
 def collect_stats(explanation_root: Path) -> Dict[str, dict]:
     merged: Dict[str, dict] = {}
@@ -31,13 +31,13 @@ def collect_stats(explanation_root: Path) -> Dict[str, dict]:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_root", type=str, default="./data/test",
+    parser.add_argument("--data_root", type=str, default="../archive/toys_ds/data/test",
                         help="Root test folder containing subdirectories (1,2,...)")
     parser.add_argument('--num_prototypes', type=int, default=5,
                         help='number of prototypes to use')
-    parser.add_argument('--data_dir', type=str, default='./data/train',
+    parser.add_argument('--data_dir', type=str, default='../archive/toys_ds/data/train',
                         help='directory of samples to choose from')
-    parser.add_argument("--explanation_root", type=str, default="explanations10_new_results",
+    parser.add_argument("--explanation_root", type=str, default="explanations10_new_results_NO_EPIC",
                         help="Root directory where explanations (per-file dirs) are written")
     parser.add_argument('--save_viz', action='store_true', default=True,
                         help='Save point cloud visualizations')
@@ -45,14 +45,13 @@ def main():
                         help="Explanation script to run")
     parser.add_argument("--python_exe", type=str, default="python",
                         help="Python executable to run the script (Windows path shown)")
-    parser.add_argument("--max_per_dir", type=int, default=5,
+    parser.add_argument("--max_per_dir", type=int, default=2,
                         help="Max number of files to process per subdirectory")
     parser.add_argument("--merge_out", type=str, default="merged_inference_stats.json",
                         help="Output merged JSON file")
     parser.add_argument("--dry_run", action="store_true")
     args = parser.parse_args()
 
-    data_root = Path(args.data_root)
 
     data_root = Path(args.data_root)
     script = args.script

@@ -1,5 +1,5 @@
 from pathlib import Path
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Subset
 from einops import rearrange
 import os
 from pytorch_lightning.loggers import TensorBoardLogger
@@ -35,14 +35,19 @@ def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device
         mask = batch.get("mask", None)
         if mask is not None:
             mask = mask.to(device)
-        dataset_indices = batch.get("sample_idx").to(device) # B,
+
+        voxel_ids = batch["voxel_ids"].to(device)  # (B, N)
+        print(voxel_ids)
+        dataset_indices = batch.get("sample_idx").to(device)  # (B,)
 
         B = features.size(0)
         if debug and batch_idx == 0:
             print(f"Batch {batch_idx}: Using dataset indices {dataset_indices.tolist()}")
+            print(f"Batch {batch_idx}: voxel_ids shape {voxel_ids.shape}, dtype={voxel_ids.dtype}")
 
         point_features, xyz_for_vox = model.extract_point_features(features, xyz_normalized, mask)
-        voxel_features, voxel_indices, point_counts, _, _ = model.voxel_agg(point_features, xyz_for_vox, mask)
+
+        voxel_features, voxel_indices, point_counts = model.voxel_agg(point_features, voxel_ids, mask)
         voxel_mask = (point_counts.squeeze(1) > 0)  # (B, V)
         voxel_features_flat = rearrange(voxel_features, 'b c x y z -> b c (x y z)')
 
@@ -54,15 +59,15 @@ def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device
             0.0
         )
 
-        batch_activations = voxel_features_flat.sum(dim=2)  # (B, C)
+        vals, ids = voxel_features_flat.max(dim=2)  # (B, C)
 
-        min_top_acts, _ = torch.min(top_acts, dim=0) # (C,)
-        update_mask = batch_activations > min_top_acts
+        min_top_acts, _ = torch.min(top_acts, dim=0)  # (C,)
+        update_mask = vals > min_top_acts
 
         if not update_mask.any():
             continue
 
-        combined_acts = torch.cat([top_acts, batch_activations], dim=0)   # (topk+B, C)
+        combined_acts = torch.cat([top_acts, vals], dim=0)   # (topk+B, C)
         dataset_idx_exp = dataset_indices.view(B, 1).expand(B, num_channels)  # (B, C)
         combined_inds = torch.cat([top_inds, dataset_idx_exp], dim=0)        # (topk+B, C)
 
@@ -75,6 +80,7 @@ def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device
 
     prototypes_dict = {c: top_inds[:, c].cpu().numpy().tolist() for c in range(num_channels)}
     return prototypes_dict
+
 
 
 def purity_argmax_voxel(voxel_features: torch.Tensor, channels: torch.Tensor, voxel_mask: torch.Tensor | None = None) -> torch.Tensor:
@@ -107,13 +113,13 @@ def purity_argmax_voxel(voxel_features: torch.Tensor, channels: torch.Tensor, vo
 
 class PrototypesDataset(Dataset):
     def __init__(self, original_dataset, prototypes_dict):
-        self.original_dataset = original_dataset
+        self.original_dataset = original_dataset.dataset if isinstance(original_dataset, Subset) else original_dataset
         self.prototypes_dict = prototypes_dict
 
         self.samples = []
         for channel, indices in prototypes_dict.items():
             for idx in indices:
-                if idx < len(original_dataset):
+                if idx < len(self.original_dataset):
                     self.samples.append((idx, channel))
 
     def __len__(self):
@@ -129,6 +135,7 @@ class PrototypesDataset(Dataset):
             "indices": data.get("indices", None),
             "label": data.get("label", None),
             "sample_idx": data.get("sample_idx", None),
+            "voxel_ids": data["voxel_ids"],
             "channel": channel
         }
 
@@ -160,7 +167,7 @@ class EpicTrainer(pl.LightningModule):
         if self.pointnet.epic is None:
             self.epic = EpicDisentangler(C=num_channels)
         else:
-            self.epic = self.pointnet.epic 
+            self.epic = self.pointnet.epic
         self.lr = lr
         self.initial_topk = initial_topk
         self.final_topk = final_topk
@@ -168,7 +175,6 @@ class EpicTrainer(pl.LightningModule):
         self.prototypes_loader = None
         self.val_prototypes_loader = None
         self.current_topk = initial_topk
-
         self.last_val_prototypes = None
 
     def common_step(self, batch, batch_idx):
@@ -178,21 +184,23 @@ class EpicTrainer(pl.LightningModule):
         mask = batch.get("mask", None)
         channels = batch["channel"]
 
+        voxel_ids = batch["voxel_ids"]
+
         with torch.no_grad():
             point_features, xyz_for_vox = self.pointnet.extract_point_features(features, xyz_normalized, mask)
-            voxel_features, indices_vox, point_counts, _, _ = self.pointnet.voxel_agg(point_features, xyz_for_vox, mask)
+            voxel_features, indices_vox, point_counts = self.pointnet.voxel_agg(point_features, voxel_ids, mask)
 
-        voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1) # (B, C, V)
+        voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1)  # (B, C, V)
         voxel_features_flat = self.epic(voxel_features_flat)
 
         voxel_mask = (point_counts.squeeze(1) > 0)  # (B, V)
         return voxel_features_flat, channels, voxel_mask
 
-
     def training_step(self, batch, batch_idx):
         voxel_features_flat, channels, voxel_mask = self.common_step(batch, batch_idx)
         purity = purity_argmax_voxel(voxel_features_flat, channels, voxel_mask)
         loss = -purity.mean()
+
 
         self.log("train/purity_mean", purity.mean(), prog_bar=True)
         self.log("train/purity_loss", loss, prog_bar=True)
@@ -251,6 +259,7 @@ class EpicTrainer(pl.LightningModule):
         self.last_val_prototypes = prototypes
         prototypes_dataset = PrototypesDataset(test_dataset, prototypes)
 
+
         self.test_prototypes_loader = DataLoader(
             prototypes_dataset,
             batch_size=batch_size,
@@ -288,20 +297,8 @@ class EpicTrainer(pl.LightningModule):
         )
 
         self.last_val_prototypes = val_prototypes
-
-        def debug_prototypes(prototypes_dict, dataset, name="dataset"):
-            total_indices = sum(len(indices) for indices in prototypes_dict.values())
-            valid_indices = sum(
-                1 for indices in prototypes_dict.values()
-                for idx in indices if idx < len(dataset)
-            )
-            print(f"{name} stats: Total indices: {total_indices}, Valid indices: {valid_indices}, Dataset size: {len(dataset)}")
-
         train_dataset = train_loader.dataset
         val_dataset = val_loader.dataset
-
-        debug_prototypes(prototypes, train_dataset, "Training")
-        debug_prototypes(val_prototypes, val_dataset, "Validation")
 
         prototypes_dataset = PrototypesDataset(train_dataset, prototypes)
         val_proto_dataset = PrototypesDataset(val_dataset, val_prototypes)
@@ -502,6 +499,16 @@ class EpicVisualizationCallback(pl.Callback):
         ], dtype=np.float32)
         return corners
 
+    # NEW: helper to compute voxel_ids in the same way as GaussianPointCloud
+    def _compute_voxel_ids_np(self, xyz_normalized: np.ndarray) -> np.ndarray:
+        if self.grid_size is None:
+            return np.zeros(xyz_normalized.shape[0], dtype=np.int64)
+        gs = self.grid_size
+        coords = np.floor(xyz_normalized * gs).astype(np.int64)
+        coords = np.clip(coords, 0, gs - 1)
+        voxel_ids = coords[:, 0] * (gs * gs) + coords[:, 1] * gs + coords[:, 2]
+        return voxel_ids
+
     def _plot_panels_points(self, panels, title, out_path, isolated=False, is_first_explained=False):
         fig = plt.figure(figsize=(4*len(panels), 4))
         edges = [
@@ -537,6 +544,9 @@ class EpicVisualizationCallback(pl.Callback):
         model.eval().to(device)
 
         prototypes = getattr(pl_module, "last_val_prototypes", None)
+
+        print("Visualizing EPIC prototypes...")
+        print(prototypes)
         if prototypes is None:
             print("No stored prototypes found")
             prototypes = {}
@@ -545,6 +555,8 @@ class EpicVisualizationCallback(pl.Callback):
 
         for c in range(self.num_channels):
             indices_for_c = prototypes.get(c, [])[: self.num_prototypes]
+
+            print(f"Visualizing channel {c}, {len(indices_for_c)} prototypes")
             if not indices_for_c:
                 continue
 
@@ -571,7 +583,12 @@ class EpicVisualizationCallback(pl.Callback):
                     full_xyz_norm = full_xyz_norm.to(device)
 
                     point_features, xyz_for_vox = model.extract_point_features(full_features, full_xyz_norm)
-                    voxel_features, indices_flat, _, voxel_min, voxel_max = model.voxel_agg(point_features, xyz_for_vox)
+
+                    xyz_norm_np = full_xyz_norm[0].cpu().numpy()  # (N, 3)
+                    voxel_ids_np = self._compute_voxel_ids_np(xyz_norm_np)  # (N,)
+                    voxel_ids = torch.from_numpy(voxel_ids_np).long().unsqueeze(0).to(device)  # (1, N)
+
+                    voxel_features, indices_flat, point_counts = model.voxel_agg(point_features, voxel_ids)
 
                     voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1)  # (B, C, V)
                     voxel_features_flat = pl_module.epic(voxel_features_flat)
@@ -590,16 +607,7 @@ class EpicVisualizationCallback(pl.Callback):
                     mask_voxel = (point_voxel_ids == voxel_idx)
 
                     corners_unit = self._voxel_corners_unit(voxel_idx, self.grid_size)  # (8, 3) in [0,1]
-                    corners_unit_t = torch.from_numpy(corners_unit).float().unsqueeze(0).to(device)  # (1, 8, 3)
-
-                    voxel_min_np = voxel_min[0].cpu().numpy().flatten()  # (B, 3, 1) -> (3,)
-                    voxel_max_np = voxel_max[0].cpu().numpy().flatten()  # (B, 3, 1) -> (3,)
-                    corners_in_voxel_space = corners_unit * (voxel_max_np - voxel_min_np) + voxel_min_np
-                    corners_in_voxel_space_t = torch.from_numpy(corners_in_voxel_space).float().unsqueeze(0).to(device)
-
-                    corners_raw = self.unit_to_raw(
-                        corners_in_voxel_space_t, stn_T, dataset_min, dataset_max
-                    )
+                    corners_raw = corners_unit * (dataset_max - dataset_min) + dataset_min  # (8, 3)
 
                     ptcl_name = self.get_point_cloud_name(ply_path)
                     full_panels.append((xyz_raw, mask_voxel, corners_raw, ptcl_name))
@@ -632,7 +640,7 @@ class EpicVisualizationCallback(pl.Callback):
                     full_panels,
                     title=f"Channel {c} â€“ full cloud (raw space) â€“ points only",
                     out_path=os.path.join(channel_dir, "prototypes_full_3d.png"),
-                    isolated=False, 
+                    isolated=False,
                     is_first_explained=is_first_explained
                 )
             if iso_panels:
@@ -648,20 +656,20 @@ class EpicVisualizationCallback(pl.Callback):
 
 
 def main():
-    pointnet_ckpt = 'model.ckpt'
-    data_dir = 'data'
-    batch_size = 2
+    pointnet_ckpt = 'model_pointnets/TEST_VOXELIZATION_10/model.ckpt'
+    data_dir = '../archive/toys_ds/data/'
+    batch_size = 16
     num_workers = 2
-    epochs = 8
-    lr = 1e-3
+    epochs = 60
+    lr = 1e-2
     prototype_update_freq = 2
-    sampling = "original_size"
+    sampling = "random"
     num_samples = 8192
-    initial_topk = 15
+    initial_topk = 20
     final_topk = 3
-    output_dir = "test_test"
+    output_dir = "test_test/epic_dislocated_output_grid_10"
     num_channel = 256
-    grid_size=7
+    grid_size=10
     early_stopping_patience = 5
 
     dm = GaussianDataModule(
@@ -671,6 +679,9 @@ def main():
         val_split=0.1,
         sampling=sampling,
         num_points=num_samples,
+        grid_size=grid_size,
+        has_color=False
+
     )
     dm.setup()
 
@@ -737,8 +748,8 @@ def main():
 
     checkpoint_callback = ModelCheckpoint(
         dirpath=output_dir,
-        filename="epic-{epoch:02d}-{val/epic_purity_loss:.4f}",
-        monitor="val/epic_purity_loss",
+        filename="epic-{epoch:02d}-{train/purity_loss:.4f}",
+        monitor="train/purity_loss",
         mode="min",
         save_top_k=3
     )
@@ -768,7 +779,7 @@ def main():
     )
 
     stopping_callback = EarlyStopping(
-        monitor="val/epic_purity_loss",
+        monitor="train/purity_loss",
         patience=early_stopping_patience,
         verbose=True,
         mode="min",

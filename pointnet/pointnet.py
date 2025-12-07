@@ -74,83 +74,53 @@ class VoxelAggregation(nn.Module):
     def forward(
         self,
         features: torch.Tensor,
-        xyz_coords_for_voxelization: torch.Tensor,
+        voxel_ids: torch.Tensor,
         mask: torch.Tensor | None = None,
     ):
         # features: (B, D, N)
-        # xyz_coords_for_voxelization: (B, N, 3)
-        B, D, _ = features.shape
-        G = self.grid_size
-
-        if mask is not None:
-            mask_expanded = mask.unsqueeze(-1).expand_as(xyz_coords_for_voxelization)
-            xyz_masked = xyz_coords_for_voxelization.clone()
-            xyz_masked[~mask_expanded] = float("inf")
-            xyz_min = xyz_masked.min(dim=1, keepdim=True).values  # (B, 1, 3)
-            xyz_masked = xyz_coords_for_voxelization.clone()
-            xyz_masked[~mask_expanded] = float("-inf")
-            xyz_max = xyz_masked.max(dim=1, keepdim=True).values  # (B, 1, 3)
-        else:
-            xyz_min = xyz_coords_for_voxelization.min(dim=1, keepdim=True).values  # (B, 1, 3)
-            xyz_max = xyz_coords_for_voxelization.max(dim=1, keepdim=True).values  # (B, 1, 3)
-
-        xyz_range = xyz_max - xyz_min + 1e-8
-        xyz_normalized_to_grid = (xyz_coords_for_voxelization - xyz_min) / xyz_range
-        xyz_normalized_to_grid = xyz_normalized_to_grid.clamp(0.0, 1.0 - 1e-6)
-
-        voxel_indices = torch.floor(xyz_normalized_to_grid * G).long()  # (B, N, 3)
-        voxel_indices = voxel_indices.clamp(0, G - 1)
-        voxel_indices_flat = (
-            voxel_indices[..., 0] * (G * G)
-            + voxel_indices[..., 1] * G
-            + voxel_indices[..., 2]
-        )  # (B, N)
+        B, D, N = features.shape
+        V = self.num_voxels
 
         if mask is not None:
             features = features * mask.unsqueeze(1).float()
-
         point_counts_raw = torch.zeros(
-            B, self.num_voxels, device=features.device, dtype=torch.long
+            B, V, device=features.device, dtype=torch.long
         )
-        ones = torch.ones_like(voxel_indices_flat, dtype=torch.long)
+        ones = torch.ones_like(voxel_ids, dtype=torch.long)
         if mask is not None:
             ones = ones * mask.long()
-        point_counts_raw.scatter_add_(1, voxel_indices_flat, ones)  # (B, V)
+        point_counts_raw.scatter_add_(1, voxel_ids, ones)  # (B, V)
 
-        voxel_indices_flat_expanded = repeat(voxel_indices_flat, "b n -> b d n", d=D)
+        voxel_ids_expanded = repeat(voxel_ids, "b n -> b d n", d=D)
 
         if self.pooling == "avg":
             voxel_features_sum = torch.zeros(
-                B, D, self.num_voxels, device=features.device, dtype=features.dtype
+                B, D, V, device=features.device, dtype=features.dtype
             )
             voxel_features_sum.scatter_add_(
-                2, voxel_indices_flat_expanded, features
+                2, voxel_ids_expanded, features
             )  # (B, D, V)
 
             point_counts = point_counts_raw.unsqueeze(1)  # (B,1,V)
-            voxel_features = voxel_features_sum / point_counts  # (B, D, V)
-
+            voxel_features = voxel_features_sum / (point_counts.clamp(min=1))  # (B, D, V)
         else:  # "max"
             voxel_features = torch.zeros(
-                B, D, self.num_voxels, device=features.device, dtype=features.dtype
+                B, D, V, device=features.device, dtype=features.dtype
             )
             voxel_features.scatter_reduce_(
                 2,
-                voxel_indices_flat_expanded,
+                voxel_ids_expanded,
                 features,
                 reduce="amax",
                 include_self=False,
             )
-            point_counts = point_counts_raw.unsqueeze(1)
+            point_counts = point_counts_raw.unsqueeze(1)  # (B,1,V)
 
+        G = self.grid_size
         voxel_features_3d = rearrange(
             voxel_features, "b d (x y z) -> b d x y z", x=G, y=G, z=G
         )
-
-        xyz_min_out = xyz_min.transpose(1, 2)  # (B, 3, 1)
-        xyz_max_out = xyz_max.transpose(1, 2)  # (B, 3, 1)
-
-        return voxel_features_3d, voxel_indices_flat, point_counts, xyz_min_out, xyz_max_out
+        return voxel_features_3d, voxel_ids, point_counts
 
 
 class PointNetCls(nn.Module):
@@ -217,8 +187,8 @@ class PointNetCls(nn.Module):
         self.last_indices = None
 
     def attach_epic(self, C: int = 1024):
-        if self.epic is None:
-            self.epic = EpicDisentangler(C)
+        # if self.epic is None:
+        self.epic = EpicDisentangler(C)
 
     @torch.no_grad()
     def apply_classifier_compensation(self):
@@ -272,18 +242,19 @@ class PointNetCls(nn.Module):
         self,
         features: torch.Tensor,
         xyz_normalized: torch.Tensor,
+        voxel_ids: torch.Tensor,
         mask: torch.Tensor | None = None,
     ):
         point_features, xyz_for_vox = self.extract_point_features(
             features, xyz_normalized, mask
         )
 
-        voxel_features, indices, point_counts, voxel_min, voxel_max = self.voxel_agg(
-            point_features, xyz_for_vox, mask
+        voxel_features, indices, point_counts = self.voxel_agg(
+            point_features, voxel_ids, mask
         )
 
-        self.last_voxel_min = voxel_min.detach()
-        self.last_voxel_max = voxel_max.detach()
+        self.last_voxel_min = None
+        self.last_voxel_max = None
 
         if self.epic is not None:
             _, _, X, Y, Z = voxel_features.shape
@@ -299,18 +270,23 @@ class PointNetCls(nn.Module):
         self,
         features: torch.Tensor,
         xyz_normalized: torch.Tensor,
+        voxel_ids: torch.Tensor,
         mask: torch.Tensor | None = None,
     ):
+        # features: (B, D, N)
+        # xyz_normalized: (B, N, 3)
+        # voxel_ids: (B, N)
         point_features, xyz_for_vox = self.extract_point_features(
             features, xyz_normalized, mask
         )
 
-        voxel_features, indices, point_counts, voxel_min, voxel_max = self.voxel_agg(
-            point_features, xyz_for_vox, mask
+        voxel_features, indices, point_counts = self.voxel_agg(
+            point_features, voxel_ids, mask
         )
 
-        self.last_voxel_min = voxel_min.detach()
-        self.last_voxel_max = voxel_max.detach()
+        # we no longer have voxel_min / voxel_max; keep these for compatibility
+        self.last_voxel_min = None
+        self.last_voxel_max = None
 
         if self.epic is not None:
             _, _, X, Y, Z = voxel_features.shape
@@ -321,7 +297,6 @@ class PointNetCls(nn.Module):
             )
 
         voxel_features_flat = rearrange(voxel_features, "b d x y z -> b d (x y z)")
-
         global_features = self.voxel_avg_pool(voxel_features_flat).squeeze(-1)
 
         voxel_activations_3d = voxel_features.norm(dim=1)
@@ -379,8 +354,8 @@ class PointNetLightning(pl.LightningModule):
 
         self._penalty_weight = float(count_penalty_weight or 0.0)
 
-    def forward(self, features, xyz_normalized, mask=None):
-        return self.model(features, xyz_normalized, mask)
+    def forward(self, features, xyz_normalized, voxel_ids, mask=None):
+        return self.model(features, xyz_normalized, voxel_ids, mask)
 
     def _count_penalty(
         self, voxel_activations: torch.Tensor, point_counts: torch.Tensor
@@ -437,14 +412,15 @@ class PointNetLightning(pl.LightningModule):
             self.log(f"{prefix}/rankme", 0.0)
 
     def training_step(self, batch, batch_idx):
-        features, xyz_normalized, labels, mask = (
+        features, xyz_normalized, labels, mask, voxel_ids = (
             batch["gauss"],
             batch["xyz_normalized"],
             batch["label"],
             batch["mask"],
+            batch["voxel_ids"],
         )
         logits, global_features, voxel_activations, point_counts, _ = self.model(
-            features, xyz_normalized, mask
+            features, xyz_normalized, voxel_ids, mask
         )
         cls_loss = F.cross_entropy(logits, labels)
         pen = self._count_penalty(voxel_activations, point_counts)
@@ -470,14 +446,15 @@ class PointNetLightning(pl.LightningModule):
         return total
 
     def validation_step(self, batch, batch_idx):
-        features, xyz_normalized, labels, mask = (
+        features, xyz_normalized, labels, mask, voxel_ids = (
             batch["gauss"],
             batch["xyz_normalized"],
             batch["label"],
             batch["mask"],
+            batch["voxel_ids"],
         )
         logits, global_features, voxel_activations, point_counts, _ = self.model(
-            features, xyz_normalized, mask
+            features, xyz_normalized, voxel_ids, mask
         )
         cls_loss = F.cross_entropy(logits, labels)
         pen = self._count_penalty(voxel_activations, point_counts)
@@ -491,14 +468,15 @@ class PointNetLightning(pl.LightningModule):
         return logits
 
     def test_step(self, batch, batch_idx):
-        features, xyz_normalized, labels, mask = (
+        features, xyz_normalized, labels, mask, voxel_ids = (
             batch["gauss"],
             batch["xyz_normalized"],
             batch["label"],
             batch["mask"],
+            batch["voxel_ids"],
         )
         logits, global_features, voxel_activations, point_counts, _ = self.model(
-            features, xyz_normalized, mask
+            features, xyz_normalized, voxel_ids, mask
         )
         cls_loss = F.cross_entropy(logits, labels)
         self.test_acc(logits, labels)
