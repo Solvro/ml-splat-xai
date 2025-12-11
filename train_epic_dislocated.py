@@ -18,7 +18,6 @@ from pointnet.pointnet import PointNetLightning
 from pointnet.dataset import GaussianDataModule, FEATURE_NAMES, collate_fn, prepare_gaussian_cloud
 from pointnet.epic import EpicDisentangler
 
-
 @torch.no_grad()
 def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device="cpu", U=None, debug=False):
     model.eval()
@@ -37,8 +36,7 @@ def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device
             mask = mask.to(device)
 
         voxel_ids = batch["voxel_ids"].to(device)  # (B, N)
-        print(voxel_ids)
-        dataset_indices = batch.get("sample_idx").to(device)  # (B,)
+        dataset_indices = batch.get("sample_idx").to(device) # B,
 
         B = features.size(0)
         if debug and batch_idx == 0:
@@ -80,7 +78,6 @@ def generate_prototypes_pointnet(model, dataloader, num_channels, topk=5, device
 
     prototypes_dict = {c: top_inds[:, c].cpu().numpy().tolist() for c in range(num_channels)}
     return prototypes_dict
-
 
 
 def purity_argmax_voxel(voxel_features: torch.Tensor, channels: torch.Tensor, voxel_mask: torch.Tensor | None = None) -> torch.Tensor:
@@ -190,7 +187,7 @@ class EpicTrainer(pl.LightningModule):
             point_features, xyz_for_vox = self.pointnet.extract_point_features(features, xyz_normalized, mask)
             voxel_features, indices_vox, point_counts = self.pointnet.voxel_agg(point_features, voxel_ids, mask)
 
-        voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1)  # (B, C, V)
+        voxel_features_flat = voxel_features.view(voxel_features.size(0), voxel_features.size(1), -1) # (B, C, V)
         voxel_features_flat = self.epic(voxel_features_flat)
 
         voxel_mask = (point_counts.squeeze(1) > 0)  # (B, V)
@@ -259,7 +256,6 @@ class EpicTrainer(pl.LightningModule):
         self.last_val_prototypes = prototypes
         prototypes_dataset = PrototypesDataset(test_dataset, prototypes)
 
-
         self.test_prototypes_loader = DataLoader(
             prototypes_dataset,
             batch_size=batch_size,
@@ -297,8 +293,19 @@ class EpicTrainer(pl.LightningModule):
         )
 
         self.last_val_prototypes = val_prototypes
+        def debug_prototypes(prototypes_dict, dataset, name="dataset"):
+            total_indices = sum(len(indices) for indices in prototypes_dict.values())
+            valid_indices = sum(
+                1 for indices in prototypes_dict.values()
+                for idx in indices if idx < len(dataset)
+            )
+            print(f"{name} stats: Total indices: {total_indices}, Valid indices: {valid_indices}, Dataset size: {len(dataset)}")
+
         train_dataset = train_loader.dataset
         val_dataset = val_loader.dataset
+
+        debug_prototypes(prototypes, train_dataset, "Training")
+        debug_prototypes(val_prototypes, val_dataset, "Validation")
 
         prototypes_dataset = PrototypesDataset(train_dataset, prototypes)
         val_proto_dataset = PrototypesDataset(val_dataset, val_prototypes)
@@ -349,9 +356,12 @@ def load_and_preprocess_ply(ply_path: Path):
     vertex = plydata["vertex"]
     pts = np.vstack([vertex[name] for name in FEATURE_NAMES]).T.astype(np.float32)
 
-    gauss, xyz_normalized, xyz_min, xyz_max, mask = prepare_gaussian_cloud(pts)
-    gauss = torch.from_numpy(gauss)
-    xyz_normalized = torch.from_numpy(xyz_normalized)
+    gauss_np, xyz_normalized_np, xyz_min, xyz_max, mask = prepare_gaussian_cloud(pts)
+
+    orig_indices = np.nonzero(mask)[0].astype(np.int64)  # (M,)
+
+    gauss = torch.from_numpy(gauss_np)
+    xyz_normalized = torch.from_numpy(xyz_normalized_np)
     gauss = torch.cat([xyz_normalized, gauss], dim=1)
 
     return {
@@ -360,7 +370,9 @@ def load_and_preprocess_ply(ply_path: Path):
         "xyz_normalized": xyz_normalized,
         "xyz_min": xyz_min,
         "xyz_max": xyz_max,
+        "orig_indices": orig_indices,
     }
+
 
 
 class EpicVisualizationCallback(pl.Callback):
@@ -460,19 +472,22 @@ class EpicVisualizationCallback(pl.Callback):
             return False
 
     @staticmethod
-    def _read_ply_to_tensors_with_raw(ply_path: str) -> tuple[torch.Tensor, torch.Tensor, np.ndarray, np.ndarray, np.ndarray]:
+    def _read_ply_to_tensors_with_raw(ply_path: str) -> tuple[torch.Tensor, torch.Tensor, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         data = load_and_preprocess_ply(Path(ply_path))
-        raw_xyz = data["pts"][:, :3].astype(np.float32)
-        features = data["gauss"].unsqueeze(0).transpose(1, 2)
-        xyz_norm = data["xyz_normalized"].unsqueeze(0)
+        # raw_xyz for the *filtered* points (so length M)
+        raw_xyz = data["pts"][data["orig_indices"], :3].astype(np.float32)
+
+        features = data["gauss"].unsqueeze(0).transpose(1, 2)    # (1, C, M)
+        xyz_norm = data["xyz_normalized"].unsqueeze(0)           # (1, M, 3)
         dataset_min = data["xyz_min"]
         dataset_max = data["xyz_max"]
-        return features, xyz_norm, raw_xyz, dataset_min, dataset_max
+        orig_indices = data["orig_indices"]                       # (M,)
+
+        return features, xyz_norm, raw_xyz, dataset_min, dataset_max, orig_indices
+
 
     @staticmethod
     def undo_stn_transformation(xyz_after_stn: torch.Tensor, stn_T: torch.Tensor) -> torch.Tensor:
-        # xyz_after_stn: (B, N, 3)
-        # Returns: (B, N, 3) in [0,1] range
         T_inv = torch.linalg.pinv(stn_T)
         xyz_bt = xyz_after_stn.transpose(1, 2)  # (B, 3, N)
         xyz_pre_stn = torch.bmm(T_inv, xyz_bt).transpose(1, 2)  # (B, N, 3)
@@ -499,10 +514,7 @@ class EpicVisualizationCallback(pl.Callback):
         ], dtype=np.float32)
         return corners
 
-    # NEW: helper to compute voxel_ids in the same way as GaussianPointCloud
     def _compute_voxel_ids_np(self, xyz_normalized: np.ndarray) -> np.ndarray:
-        if self.grid_size is None:
-            return np.zeros(xyz_normalized.shape[0], dtype=np.int64)
         gs = self.grid_size
         coords = np.floor(xyz_normalized * gs).astype(np.int64)
         coords = np.clip(coords, 0, gs - 1)
@@ -544,19 +556,13 @@ class EpicVisualizationCallback(pl.Callback):
         model.eval().to(device)
 
         prototypes = getattr(pl_module, "last_val_prototypes", None)
-
-        print("Visualizing EPIC prototypes...")
-        print(prototypes)
         if prototypes is None:
             print("No stored prototypes found")
             prototypes = {}
 
         os.makedirs(self.output_dir, exist_ok=True)
-
         for c in range(self.num_channels):
             indices_for_c = prototypes.get(c, [])[: self.num_prototypes]
-
-            print(f"Visualizing channel {c}, {len(indices_for_c)} prototypes")
             if not indices_for_c:
                 continue
 
@@ -573,7 +579,8 @@ class EpicVisualizationCallback(pl.Callback):
                     continue
 
                 try:
-                    full_features, full_xyz_norm, raw_xyz, dataset_min, dataset_max = self._read_ply_to_tensors_with_raw(ply_path)
+                    full_features, full_xyz_norm, raw_xyz, dataset_min, dataset_max, orig_indices = self._read_ply_to_tensors_with_raw(ply_path)
+
                 except Exception as e:
                     print(f"channel {c} Error reading PLY {ply_path}: {e}")
                     continue
@@ -605,15 +612,17 @@ class EpicVisualizationCallback(pl.Callback):
 
                     point_voxel_ids = indices_flat[0].detach().cpu().numpy()
                     mask_voxel = (point_voxel_ids == voxel_idx)
-
+                    ptcl_name = self.get_point_cloud_name(ply_path)
                     corners_unit = self._voxel_corners_unit(voxel_idx, self.grid_size)  # (8, 3) in [0,1]
                     corners_raw = corners_unit * (dataset_max - dataset_min) + dataset_min  # (8, 3)
 
-                    ptcl_name = self.get_point_cloud_name(ply_path)
                     full_panels.append((xyz_raw, mask_voxel, corners_raw, ptcl_name))
                     iso_panels.append((xyz_raw[mask_voxel], np.ones(mask_voxel.sum(), dtype=bool), corners_raw, ptcl_name))
 
-                    highlight_ids = np.nonzero(mask_voxel)[0].tolist()
+                    highlight_ids_proc = np.nonzero(mask_voxel)[0]  # (K,)
+                    highlight_ids = orig_indices[highlight_ids_proc].tolist()
+
+
                     rank_offset = 0 if is_first_explained else 1
                     try:
                         full_out = os.path.join(channel_dir, f"rank{rank+rank_offset:02d}_full_colored.ply")
@@ -638,15 +647,15 @@ class EpicVisualizationCallback(pl.Callback):
             if full_panels:
                 self._plot_panels_points(
                     full_panels,
-                    title=f"Channel {c} â€“ full cloud (raw space) â€“ points only",
+                    title=f"Channel {c} – full cloud (raw space) – points only",
                     out_path=os.path.join(channel_dir, "prototypes_full_3d.png"),
-                    isolated=False,
+                    isolated=False, 
                     is_first_explained=is_first_explained
                 )
             if iso_panels:
                 self._plot_panels_points(
                     iso_panels,
-                    title=f"Channel {c} â€“ isolated voxels (raw space) â€“ points only",
+                    title=f"Channel {c} – isolated voxels (raw space) – points only",
                     out_path=os.path.join(channel_dir, "prototypes_isolated_3d.png"),
                     isolated=True,
                     is_first_explained=is_first_explained
@@ -656,21 +665,21 @@ class EpicVisualizationCallback(pl.Callback):
 
 
 def main():
-    pointnet_ckpt = 'model_pointnets/TEST_VOXELIZATION_10/model.ckpt'
-    data_dir = '../archive/toys_ds/data/'
-    batch_size = 16
+    pointnet_ckpt = 'model_pointnets/CHINOL_kl_3-5_grid_7_1024-256_downsampled2/model.ckpt'
+    data_dir = '../archive/data/data/'
+    batch_size = 1
     num_workers = 2
-    epochs = 60
-    lr = 1e-2
+    epochs = 1
+    lr = 1e-3
     prototype_update_freq = 2
-    sampling = "random"
+    sampling = "original_size"
     num_samples = 8192
-    initial_topk = 20
-    final_topk = 3
-    output_dir = "test_test/epic_dislocated_output_grid_10"
+    initial_topk = 1
+    final_topk = 1
+    output_dir = "model_epic/SHAPESPLAT_kl_3-5_grid_7_1024-256_downsampled2/"
     num_channel = 256
-    grid_size=10
-    early_stopping_patience = 5
+    grid_size=5
+    early_stopping_patience = 15
 
     dm = GaussianDataModule(
         data_dir=data_dir,
@@ -680,7 +689,6 @@ def main():
         sampling=sampling,
         num_points=num_samples,
         grid_size=grid_size,
-        has_color=False
 
     )
     dm.setup()
@@ -748,8 +756,8 @@ def main():
 
     checkpoint_callback = ModelCheckpoint(
         dirpath=output_dir,
-        filename="epic-{epoch:02d}-{train/purity_loss:.4f}",
-        monitor="train/purity_loss",
+        filename="epic-{epoch:02d}-{val/epic_purity_loss:.4f}",
+        monitor="val/epic_purity_loss",
         mode="min",
         save_top_k=3
     )
@@ -779,7 +787,7 @@ def main():
     )
 
     stopping_callback = EarlyStopping(
-        monitor="train/purity_loss",
+        monitor="val/epic_purity_loss",
         patience=early_stopping_patience,
         verbose=True,
         mode="min",
@@ -794,7 +802,7 @@ def main():
         logger=logger,
         check_val_every_n_epoch=1,
         num_sanity_val_steps=2,
-        accumulate_grad_batches=4,
+        accumulate_grad_batches=2,
         reload_dataloaders_every_n_epochs=prototype_update_freq
     )
 

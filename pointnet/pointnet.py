@@ -187,8 +187,8 @@ class PointNetCls(nn.Module):
         self.last_indices = None
 
     def attach_epic(self, C: int = 1024):
-        # if self.epic is None:
-        self.epic = EpicDisentangler(C)
+        if self.epic is None:
+            self.epic = EpicDisentangler(C)
 
     @torch.no_grad()
     def apply_classifier_compensation(self):
@@ -273,9 +273,6 @@ class PointNetCls(nn.Module):
         voxel_ids: torch.Tensor,
         mask: torch.Tensor | None = None,
     ):
-        # features: (B, D, N)
-        # xyz_normalized: (B, N, 3)
-        # voxel_ids: (B, N)
         point_features, xyz_for_vox = self.extract_point_features(
             features, xyz_normalized, mask
         )
@@ -284,7 +281,6 @@ class PointNetCls(nn.Module):
             point_features, voxel_ids, mask
         )
 
-        # we no longer have voxel_min / voxel_max; keep these for compatibility
         self.last_voxel_min = None
         self.last_voxel_max = None
 

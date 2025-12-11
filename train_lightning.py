@@ -33,13 +33,11 @@ def main():
     parser.add_argument("--stn_nd", action="store_true", help="Use feature STN layer")    
     parser.add_argument("--head_norm", action="store_true", help="Use feature STN layer")    
     parser.add_argument("--stn_head_norm", action="store_true", help="Use feature STN layer")    
-    parser.add_argument("--has_color", action="store_true")
     parser.add_argument("--fast_dev_run", action="store_true")
     parser.add_argument("--count_penalty_type", type=str, default="softmax", choices=["softmax", "ratio", "kl_to_counts"], help="Save model checkpoints")
     parser.add_argument("--count_penalty_weight", type=float, default=None)
     parser.add_argument("--count_penalty_beta", type=float, default=1.0)
     parser.add_argument("--count_penalty_tau", type=float, default=1.0)
-
     parser.add_argument("--pooling", type=str, default="max", choices=["max", "avg"], help="Save model checkpoints")
 
     args = parser.parse_args()
@@ -51,9 +49,7 @@ def main():
         val_split=args.val_split,
         sampling=args.sampling,
         num_points=args.num_points,
-        has_color=args.has_color,
         grid_size=args.grid_size,
-
     )
     datamodule.setup()
 

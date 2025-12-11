@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Dict
 import logging
 
-def run_explain(python_exe: str, script: str, ply_path: str, output_path: str, num_prototypes: int, data_dir: str, save_viz: bool = False) -> subprocess.CompletedProcess:
-    cmd = [python_exe, script, "--ply_path", ply_path, "--output_path", output_path, "--num_prototypes", str(num_prototypes), "--data_dir", data_dir]
+def run_explain(python_exe: str, script: str, ply_path: str, output_path: str, num_prototypes: int, data_dir: str, save_viz: bool = False, pointnet_ckpt: str = 'pointnet_epic_compensated.pt') -> subprocess.CompletedProcess:
+    cmd = [python_exe, script, "--ply_path", ply_path, "--output_path", output_path, "--num_prototypes", str(num_prototypes), "--data_dir", data_dir, "--pointnet_ckpt", pointnet_ckpt]
     if save_viz:
         cmd.append("--save_viz")
     return subprocess.run(cmd, capture_output=False, text=False)
@@ -31,13 +31,15 @@ def collect_stats(explanation_root: Path) -> Dict[str, dict]:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_root", type=str, default="../archive/toys_ds/data/test",
+    parser.add_argument("--data_root", type=str, default="../archive/data/data/test",
                         help="Root test folder containing subdirectories (1,2,...)")
+    parser.add_argument("--pointnet_ckpt", type=str, default="model_epic/CHINOL_kl_3-5_grid_7_1024-256_downsampled2/pointnet_epic_compensated.pt",
+                        help="Path to pointnet")
     parser.add_argument('--num_prototypes', type=int, default=5,
                         help='number of prototypes to use')
-    parser.add_argument('--data_dir', type=str, default='../archive/toys_ds/data/train',
+    parser.add_argument('--data_dir', type=str, default='../archive/data/data/train',
                         help='directory of samples to choose from')
-    parser.add_argument("--explanation_root", type=str, default="explanations10_new_results_NO_EPIC",
+    parser.add_argument("--explanation_root", type=str, default="wcss/explaining/chinol/CHINOL_kl_3-5_grid_7_1024-256_downsampled2_VOXELIZATION_NO_EPIC",
                         help="Root directory where explanations (per-file dirs) are written")
     parser.add_argument('--save_viz', action='store_true', default=True,
                         help='Save point cloud visualizations')
@@ -45,7 +47,7 @@ def main():
                         help="Explanation script to run")
     parser.add_argument("--python_exe", type=str, default="python",
                         help="Python executable to run the script (Windows path shown)")
-    parser.add_argument("--max_per_dir", type=int, default=2,
+    parser.add_argument("--max_per_dir", type=int, default=5,
                         help="Max number of files to process per subdirectory")
     parser.add_argument("--merge_out", type=str, default="merged_inference_stats.json",
                         help="Output merged JSON file")
@@ -60,6 +62,7 @@ def main():
     data_dir = args.data_dir
     save_viz = args.save_viz
     explanation_root = Path(args.explanation_root)
+    pointnet_ckpt = Path(args.pointnet_ckpt)
     explanation_root.mkdir(parents=True, exist_ok=True)
 
     # gather first N .ply files from each subdir
@@ -79,7 +82,7 @@ def main():
         print(f"Processing: {ply}")
         if args.dry_run:
             continue
-        res = run_explain(python_exe, script, ply, explanation_root, num_prototypes, data_dir, save_viz)
+        res = run_explain(python_exe, script, ply, explanation_root, num_prototypes, data_dir, save_viz, pointnet_ckpt)
         if res.returncode != 0:
             print(f"  Error running script for {ply}:")
             print(res.stderr)
