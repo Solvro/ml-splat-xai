@@ -1,4 +1,3 @@
-import os
 from typing import Sequence
 
 import torch
@@ -137,7 +136,7 @@ class PrototypeVisualizationCallback(pl.Callback):
             return
 
         G = self.grid_size
-        vol = model.last_voxel_activations[0].squeeze(0).detach().cpu()  # (G, G, G) -> take the 1st batch item
+        vol = model.last_voxel_activations[0].squeeze(0).detach().cpu()  # (G, G, G)
         indices_b0 = model.last_indices[0].detach().cpu()                # (N,)
         xyz_b0 = model.last_xyz_for_vox[0].detach().cpu()                # (N, 3)
 
@@ -146,8 +145,7 @@ class PrototypeVisualizationCallback(pl.Callback):
         top_vals, top_idx = torch.topk(flat, K, largest=True)
         top_idx_list = [int(i) for i in top_idx.detach().cpu().tolist()]
 
-        # liczności
-        counts = torch.bincount(indices_b0, minlength=G**3).float()  # (G^3,) -> how many points in each voxel
+        counts = torch.bincount(indices_b0, minlength=G**3).float()  # (G^3,)
         nonempty = counts[counts > 0]
         occupancy_ratio = (counts > 0).float().mean().item() # fraction of the whole grid that is occupied
         mean_pts_per_nonempty = float(nonempty.mean().item()) if nonempty.numel() > 0 else 0.0
@@ -155,9 +153,7 @@ class PrototypeVisualizationCallback(pl.Callback):
         frac_pts_in_topk = pts_in_topk / max(1, int(counts.sum().item()))
         topk_mask = torch.zeros_like(indices_b0, dtype=torch.bool)
 
-        # penalty-specific: korelacja, udział masy aktywacji w małych kubełkach
         acts_pos = torch.relu(flat)
-        # Pearson r (na niepustych, żeby uniknąć trzymania zera/zera)
         mask_nonzero = (counts > 0)
         if mask_nonzero.any():
             c_np = counts[mask_nonzero].numpy()
@@ -198,7 +194,7 @@ class PrototypeVisualizationCallback(pl.Callback):
             if pts.numel() == 0:
                 continue
             ax_xy.scatter(pts[:, 0], pts[:, 1], s=8, color=colors[r], alpha=0.95, label=f"voxel#{r+1} (idx={flat_idx}, n={int(counts[flat_idx].item())})")
-            x_idx, y_idx, z_idx = self._flat_to_xyz(flat_idx, G)
+            x_idx, y_idx, _ = self._flat_to_xyz(flat_idx, G)
             x0, x1 = x_idx / G, (x_idx + 1) / G
             y0, y1 = y_idx / G, (y_idx + 1) / G
             ax_xy.plot([x0, x1, x1, x0, x0], [y0, y0, y1, y1, y0], color=colors[r], lw=2, alpha=0.9)

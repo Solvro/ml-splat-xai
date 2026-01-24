@@ -1,0 +1,29 @@
+# Stage 2: Disentangler Training Configuration
+pointnet_ckpt: "checkpoints/stage_1/pointnet_backbone.ckpt"
+
+data_dir: "data"
+val_split: 0.1
+
+sampling: "original_size"  # Options: fps, random, original_size
+num_samples: 8192
+
+grid_size: 7
+
+epochs: 30
+batch_size: 8
+num_workers: 2
+lr: 0.001
+accumulate_grad_batches: 4
+
+prototype_update_freq: 2
+initial_topk: 40
+final_topk: 5
+num_channels: 256
+
+early_stopping_patience: 15
+
+output_dir: "checkpoints/stage_2"
+log_name: "disentangler_logs"
+
+viz_channels: 6
+viz_topk: 5

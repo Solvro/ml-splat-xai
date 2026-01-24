@@ -1,0 +1,32 @@
+# Stage 1: PointNet Backbone Training Configuration
+data_dir: "data"
+val_split: 0.1
+
+sampling: "random"  # Options: fps, random, original_size
+num_points: 8192
+
+grid_size: 7
+
+epochs: 50
+batch_size: 12
+lr: 0.001
+workers: 4
+
+accelerator: "auto"
+device: "auto"
+
+stn_3d: true
+stn_nd: true
+head_size: 256
+stn_head_norm: false
+pooling: "max"  # Options: max, avg
+
+count_penalty_type: "kl_to_counts"  # Options: softmax, ratio, kl_to_counts
+count_penalty_weight: 3.5
+count_penalty_beta: 1.0
+count_penalty_tau: 1.0
+
+model_save_path: "checkpoints/stage_1"
+model_save_name: "pointnet_backbone"
+
+fast_dev_run: false

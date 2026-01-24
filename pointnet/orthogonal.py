@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
 
-class EpicDisentangler(nn.Module):
+
+class OrthogonalDisentangler(nn.Module):
     def __init__(self, C: int = 1024, device: str | None = None, dtype: torch.dtype | None = None):
         super().__init__()
         self.C = C

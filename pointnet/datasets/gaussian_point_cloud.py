@@ -4,9 +4,9 @@ import numpy as np
 from numpy.random import default_rng
 import torch
 from plyfile import PlyData
-from torch.utils.data import Dataset, DataLoader, random_split
 import pytorch_lightning as pl
 from sklearn.preprocessing import normalize 
+from torch.utils.data import Dataset, DataLoader, random_split
 
 
 FEATURE_NAMES: list[str] = [
@@ -16,6 +16,7 @@ FEATURE_NAMES: list[str] = [
     "opacity",
 ]
 OPACITY_THRESHOLD = 0.005
+
 
 def sigmoid(x):
     return 1 / (1 + np.exp(-x))
@@ -88,6 +89,12 @@ class GaussianPointCloud(Dataset):
             self.classes.append(class_name)
             for ply_path in class_dir.glob("*.ply"):
                 self.files.append((ply_path, self.class_to_idx[class_name]))
+        if len(self.files) == 0:
+            raise FileNotFoundError(
+                f"No .ply files found under {self.root}. "
+                "Check data_dir/train (or data_dir) and file extensions."
+            )
+
     @staticmethod
     def _read_ply(path: Path) -> np.ndarray:
         plydata = PlyData.read(str(path))
@@ -137,7 +144,6 @@ class GaussianPointCloud(Dataset):
         voxel_ids = voxel_ids_all[sampled_valid_indices]            # (K,)
         orig_indices = original_valid_indices[sampled_valid_indices]  # (K,)
 
-        # 7. Build final feature tensor: [xyz_normalized, gauss]
         gauss_tensor = torch.from_numpy(gauss)
         xyz_norm_tensor = torch.from_numpy(xyz_normalized)
         gauss_cat = torch.cat([xyz_norm_tensor, gauss_tensor], dim=1)  # (K, D)

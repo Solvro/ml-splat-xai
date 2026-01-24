@@ -1,12 +1,11 @@
+from einops import rearrange, repeat
+import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange, repeat
-import pytorch_lightning as pl
 import torchmetrics
 
-from pointnet.rescale_to_unit_cube import rescale_to_unit_cube
-from pointnet.epic import EpicDisentangler
+from pointnet.orthogonal import OrthogonalDisentangler
 
 
 def exists(val):
@@ -78,7 +77,7 @@ class VoxelAggregation(nn.Module):
         mask: torch.Tensor | None = None,
     ):
         # features: (B, D, N)
-        B, D, N = features.shape
+        B, D, _ = features.shape
         V = self.num_voxels
 
         if mask is not None:
@@ -131,11 +130,10 @@ class PointNetCls(nn.Module):
         grid_size: int = 10,
         stn_3d=True,
         stn_nd: bool = True,
-        head_norm=False,
-        dropout=0.3,
         stn_head_norm=False,
         pooling: str = "max",
-    ):
+        head_size: int = 256,
+    ) -> None:
         super().__init__()
         self.grid_size = grid_size
 
@@ -162,21 +160,16 @@ class PointNetCls(nn.Module):
             nn.Conv1d(64, 128, 1, bias=False),
             nn.BatchNorm1d(128),
             nn.GELU(),
-            nn.Conv1d(128, 256, 1, bias=False),
-            nn.BatchNorm1d(256),
+            nn.Conv1d(128, head_size, 1, bias=False),
+            nn.BatchNorm1d(head_size),
         )
 
         self.voxel_agg = VoxelAggregation(grid_size, pooling=pooling)
         self.voxel_avg_pool = nn.AdaptiveAvgPool1d(1)
 
-        norm = nn.LayerNorm if head_norm else nn.Identity
+        self.head = nn.Linear(head_size, out_dim, bias=False)
 
-        head_size = 256
-        self.head = nn.Sequential(
-            nn.Linear(head_size, out_dim, bias=False)
-        )
-
-        self.epic: EpicDisentangler | None = None
+        self.disentangler: OrthogonalDisentangler | None = None
 
         self.last_stn_T = None
         self.last_voxel_min = None
@@ -186,30 +179,23 @@ class PointNetCls(nn.Module):
         self.last_point_counts = None
         self.last_indices = None
 
-    def attach_epic(self, C: int = 1024):
-        if self.epic is None:
-            self.epic = EpicDisentangler(C)
+    def attach_disentangler(self, C: int = 1024) -> None:
+        if self.disentangler is None:
+            self.disentangler = OrthogonalDisentangler(C)
 
     @torch.no_grad()
-    def apply_classifier_compensation(self):
-        if self.epic is None:
-            return
-        first_linear = None
-        for m in self.head:
-            if isinstance(m, nn.Linear):
-                first_linear = m
-                break
-        if first_linear is None:
+    def apply_classifier_compensation(self) -> None:
+        if self.disentangler is None:
             return
         invU = (
-            self.epic.inverse()
-            .to(first_linear.weight.device)
-            .to(first_linear.weight.dtype)
+            self.disentangler.inverse()
+            .to(self.head.weight.device)
+            .to(self.head.weight.dtype)
         )
-        W = first_linear.weight.data
+        W = self.head.weight.data
         with torch.no_grad():
             newW = W @ invU
-            first_linear.weight.copy_(newW)
+            self.head.weight.copy_(newW)
 
     def extract_point_features(
         self,
@@ -249,17 +235,17 @@ class PointNetCls(nn.Module):
             features, xyz_normalized, mask
         )
 
-        voxel_features, indices, point_counts = self.voxel_agg(
+        voxel_features, _, _ = self.voxel_agg(
             point_features, voxel_ids, mask
         )
 
         self.last_voxel_min = None
         self.last_voxel_max = None
 
-        if self.epic is not None:
+        if self.disentangler is not None:
             _, _, X, Y, Z = voxel_features.shape
             flat_vox = rearrange(voxel_features, "b c x y z -> b c (x y z)")
-            rotated_vox = self.epic(flat_vox)
+            rotated_vox = self.disentangler(flat_vox)
             voxel_features = rearrange(
                 rotated_vox, "b c (x y z) -> b c x y z", x=X, y=Y, z=Z
             )
@@ -284,10 +270,10 @@ class PointNetCls(nn.Module):
         self.last_voxel_min = None
         self.last_voxel_max = None
 
-        if self.epic is not None:
+        if self.disentangler is not None:
             _, _, X, Y, Z = voxel_features.shape
             flat_vox = rearrange(voxel_features, "b c x y z -> b c (x y z)")
-            rotated_vox = self.epic(flat_vox)
+            rotated_vox = self.disentangler(flat_vox)
             voxel_features = rearrange(
                 rotated_vox, "b c (x y z) -> b c x y z", x=X, y=Y, z=Z
             )
@@ -320,8 +306,8 @@ class PointNetLightning(pl.LightningModule):
         stn_nd=True,
         lr=1e-3,
         weight_decay=1e-4,
-        head_norm=False,
         stn_head_norm=False,
+        head_size=256,
         count_penalty_weight: float | None = None,
         count_penalty_type: str = "softmax",
         count_penalty_beta: float = 1.0,
@@ -336,7 +322,6 @@ class PointNetLightning(pl.LightningModule):
             grid_size,
             stn_3d,
             stn_nd,
-            head_norm=head_norm,
             stn_head_norm=stn_head_norm,
             pooling=pooling,
         )
@@ -385,10 +370,13 @@ class PointNetLightning(pl.LightningModule):
         return pen
 
     def _calculate_and_log_metrics(self, features, prefix):
-        features = features - features.mean(dim=0, keepdim=True)
+        features_cpu = features.detach().float().cpu()
 
-        cov_matrix = torch.cov(features.T)
+        features_cpu = features_cpu - features_cpu.mean(dim=0, keepdim=True)
+
+        cov_matrix = torch.cov(features_cpu.T)
         eigenvalues = torch.linalg.eigvalsh(cov_matrix)
+
         sorted_eigenvalues, _ = torch.sort(eigenvalues, descending=True)
 
         self.log(f"{prefix}/eigenvalue_max", sorted_eigenvalues[0])
@@ -396,8 +384,8 @@ class PointNetLightning(pl.LightningModule):
         self.log(f"{prefix}/eigenvalue_min", sorted_eigenvalues[-1])
 
         try:
-            singular_values = torch.linalg.svdvals(features)
-            singular_values_normalized = singular_values / torch.sum(singular_values)
+            singular_values = torch.linalg.svdvals(features_cpu)
+            singular_values_normalized = singular_values / singular_values.sum()
             entropy = -torch.sum(
                 singular_values_normalized
                 * torch.log(singular_values_normalized + 1e-8)
@@ -471,7 +459,7 @@ class PointNetLightning(pl.LightningModule):
             batch["mask"],
             batch["voxel_ids"],
         )
-        logits, global_features, voxel_activations, point_counts, _ = self.model(
+        logits, global_features, _, _, _ = self.model(
             features, xyz_normalized, voxel_ids, mask
         )
         cls_loss = F.cross_entropy(logits, labels)
