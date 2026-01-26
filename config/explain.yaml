@@ -1,0 +1,24 @@
+# XSPLAIN Explanation Configuration
+
+pointnet_ckpt: "checkpoints/stage_2/pointnet_disentangler_compensated.pt"
+
+data_dir: "data"
+output_path: "explanations"
+
+# Model architecture (must match training configuration)
+grid_size: 7
+num_channels: 256
+head_size: 256
+stn_3d: true
+stn_nd: true
+
+sampling: "original_size"  # Options: fps, random, original_size
+num_samples: 8192
+
+num_prototypes: 5
+do_sample: false
+
+save_viz: true
+
+batch_size: 1
+num_workers: 2
