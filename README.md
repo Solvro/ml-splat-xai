@@ -312,5 +312,27 @@ explanations/
   <img src="resources/teaser.png" alt="Teaser" width="920">
 </p>
 
-## Appendix to Paper
-todo
+## User Study Results
+
+We collected full responses from $N = 51$ respondents. The study group consisted of 6 women and 45 men. Regarding Machine Learning expertise, the majority were intermediate $(N=26)$ or advanced $(N=14)$ practitioners, with the remainder being beginners $(N=9)$ or having no experience $(N=2)$. Experience with 3D modelling was more limited, with most participants identifying as beginners $(N=22)$ or having no experience $(N=21)$, and only 8 intermediate users. Familiarity with Explainable AI (XAI) was mixed: 23 participants had no prior experience, while the rest were intermediate $(N=16)$, beginners $(N=11)$, or advanced $(N=1)$ users. Each respondent evaluated 3 separate items. In each item, the respondent saw 3 explanation methods, denoted Method A, Method B, and Method C. Two information were collected per item.
+
+- **Best method selection:** a single categorical choice among $\{A,B,C\}$.
+
+- **Confidence rating:** a four level confidence rating, mapped to integers ("Fairly confident correct" to 4,
+"Somewhat confident correct" to 3, "Somewhat confident incorrect" to 2, "Fairly confident incorrect" maps to 1) that the selected explanation supports a correct understanding.
+
+### Key Findings
+The study focused on two main metrics: **User Preference** (which explanation is the most helpful?) and **Perceived Confidence** (does the explanation convince the user that the prediction is correct?).
+
+* **Decisive Preference:** Participants selected **XSPLAIN** explanations as the "best" choice **49.4%** of the time, significantly outperforming SHAP (32.7%) and LIME (18.0%) with statistical significance ($p < 0.001$).
+* **Increased Trust:** Our method achieved the highest share of "Confident Correct" ratings (**46.5%**), indicating that prototype-based explanations effectively foster user trust in correct model predictions.
+
+### Quantitative Comparison
+
+| Metric Category | Response Label | LIME | SHAP | **XSPLAIN (Ours)** |
+| :--- | :--- | :---: | :---: | :---: |
+| **Preference** | *Chosen as Best Explanation* | 17.95% | 32.69% | **49.36%** |
+| **Confidence** | *High Confidence in Prediction* | 22.58% | 30.97% | **46.45%** |
+| **Confidence** | *Perceived as Incorrect/Unsure* | 41.18% | 32.35% | **26.47%** |
+
+> **Analysis:** While baseline methods often produce ambiguous saliency maps, users consistently found XSPLAIN's "this looks like that" reasoning grounded in volumetric prototypes to be more transparent and trustworthy.
