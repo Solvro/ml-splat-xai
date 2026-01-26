@@ -3,7 +3,7 @@ data_dir: "data"
 val_split: 0.1
 
 sampling: "random"  # Options: fps, random, original_size
-num_points: 8192
+num_samples: 8192
 
 grid_size: 7
 
