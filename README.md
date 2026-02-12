@@ -1,6 +1,11 @@
 # <div align="center">XSPLAIN: XAI-enabling Splat-based Prototype Learning for Attribute-aware INterpretability</div>
 
 <p align="center">
+  <a href="https://arxiv.org/abs/2602.10239"><img src="https://img.shields.io/badge/arXiv-2602.10239-b31b1b.svg" alt="arXiv"></a>
+  <a href="https://dominik-galus.github.io/XSPLAIN/"><img src="https://img.shields.io/badge/🌐-Project%20Page-blue" alt="Project Page"></a>
+</p>
+
+<p align="center">
   <em>Demo (loops):</em><br>
   <img src="resources/microphone.gif" alt="XSPLAIN demo" width="920">
 </p>
@@ -168,3 +173,18 @@ The study focused on two main metrics: **User Preference** (which explanation is
 | **Confidence** | *Perceived as Incorrect/Unsure* | 41.18% | 32.35% | **26.47%** |
 
 > **Analysis:** While baseline methods often produce ambiguous saliency maps, users consistently found XSPLAIN's "this looks like that" reasoning grounded in volumetric prototypes to be more transparent and trustworthy.
+
+## Citation
+If you find our work useful, please consider citing:
+
+```bibtex
+@misc{galus2026xsplainxaienablingsplatbasedprototype,
+      title={XSPLAIN: XAI-enabling Splat-based Prototype Learning for Attribute-aware INterpretability}, 
+      author={Dominik Galus and Julia Farganus and Tymoteusz Zapala and Mikołaj Czachorowski and Piotr Borycki and Przemysław Spurek and Piotr Syga},
+      year={2026},
+      eprint={2602.10239},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2602.10239}, 
+}
+```
