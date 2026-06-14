@@ -467,7 +467,7 @@ class PointNetLightning(pl.LightningModule):
         self.log("test/classification_loss", cls_loss, on_epoch=True, prog_bar=False)
         self.log("test_acc", self.test_acc, on_epoch=True, prog_bar=True)
 
-        self._calculate_and_log_metrics(global_features, "val")
+        self._calculate_and_log_metrics(global_features, "test")
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(

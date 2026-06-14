@@ -203,13 +203,13 @@ class PrototypeVisualizationCallback(pl.Callback):
         writer.add_figure("viz/xy_projection_b0", fig_xy, trainer.current_epoch)
         plt.close(fig_xy)
 
-        # Top-K: aktywacja + adnotacja o liczności
+        # Top-K: activation + count adnotation
         top_counts = counts[top_idx]
         fig_bars = self._plot_topk_bars(top_vals, top_counts, title=f"Top-{K} voxel activations – epoch {trainer.current_epoch}")
         writer.add_figure("penalty/topk_activation_with_counts_b0", fig_bars, trainer.current_epoch)
         plt.close(fig_bars)
 
-        # Histogram liczności niepustych
+        # Count Histogram
         if nonempty.numel() > 0:
             fig_hist = self._plot_counts_hist(nonempty, title=f"Counts per non-empty voxel – epoch {trainer.current_epoch}")
             writer.add_figure("penalty/counts_hist_b0", fig_hist, trainer.current_epoch)

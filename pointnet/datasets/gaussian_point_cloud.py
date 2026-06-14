@@ -3,7 +3,8 @@ from pathlib import Path
 import numpy as np
 from numpy.random import default_rng
 import torch
-from plyfile import PlyData
+import warnings
+from plyfile import PlyData, PlyElementParseError
 import pytorch_lightning as pl
 from sklearn.preprocessing import normalize 
 from torch.utils.data import Dataset, DataLoader, random_split
@@ -66,6 +67,8 @@ class GaussianPointCloud(Dataset):
         sampling_method: str | None = "random",  # "random", "original_size"
         random_seed: int | None = None,
         grid_size: int | None = None,
+        class_to_idx: dict[str, int] | None = None,
+        classes: list[str] | None = None,
     ):
         self.root = Path(root)
         self.num_points = num_points
@@ -78,17 +81,27 @@ class GaussianPointCloud(Dataset):
         self.grid_size = grid_size
 
         self.files: list[tuple[Path, int]] = []
-        self.classes: list[str] = []
-        self.class_to_idx = {}
 
-        for class_dir in sorted(self.root.iterdir()):
+        if class_to_idx is not None and classes is not None:
+            self.class_to_idx = class_to_idx
+            self.classes = classes
+        else:
+            self.classes = []
+            self.class_to_idx = {}
+            for class_dir in sorted(self.root.iterdir()):
+                if not class_dir.is_dir():
+                    continue
+                class_name = class_dir.name
+                self.class_to_idx[class_name] = len(self.class_to_idx)
+                self.classes.append(class_name)
+
+        for class_name, class_idx in self.class_to_idx.items():
+            class_dir = self.root / class_name
             if not class_dir.is_dir():
                 continue
-            class_name = class_dir.name
-            self.class_to_idx[class_name] = len(self.class_to_idx)
-            self.classes.append(class_name)
             for ply_path in class_dir.glob("*.ply"):
-                self.files.append((ply_path, self.class_to_idx[class_name]))
+                self.files.append((ply_path, class_idx))
+
         if len(self.files) == 0:
             raise FileNotFoundError(
                 f"No .ply files found under {self.root}. "
@@ -130,7 +143,14 @@ class GaussianPointCloud(Dataset):
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         path, label = self.files[idx]
-        pts = self._read_ply(path)
+
+        try:
+            pts = self._read_ply(path)
+        except (PlyElementParseError, EOFError, ValueError) as e:
+            warnings.warn(f"Error: {path}:{e}\n")
+            fallback_idx = torch.randint(0, len(self.files), (1,)).item()
+            return self.__getitem__(fallback_idx)
+
         gauss_all, xyz_norm_all, xyz_min, xyz_max, mask_full = prepare_gaussian_cloud(pts)
         M = gauss_all.shape[0]
         voxel_ids_all = self._compute_voxel_ids(xyz_norm_all)
@@ -252,13 +272,6 @@ class GaussianDataModule(pl.LightningDataModule):
             train_path = root_path
             test_path = root_path
 
-        self.test_ds = GaussianPointCloud(
-            test_path,
-            num_points=self.hparams.num_points,
-            sampling_method=self.hparams.sampling,
-            random_seed=self.hparams.seed,
-            grid_size=self.hparams.grid_size,
-        )
         dataset = GaussianPointCloud(
             train_path,
             num_points=self.hparams.num_points,
@@ -267,6 +280,16 @@ class GaussianDataModule(pl.LightningDataModule):
             grid_size=self.hparams.grid_size,
         )
         self.num_classes = len(dataset.classes)
+
+        self.test_ds = GaussianPointCloud(
+            test_path,
+            num_points=self.hparams.num_points,
+            sampling_method=self.hparams.sampling,
+            random_seed=self.hparams.seed,
+            grid_size=self.hparams.grid_size,
+            class_to_idx=dataset.class_to_idx,
+            classes=dataset.classes,
+        )
         n_val = int(len(dataset) * self.hparams.val_split)
         n_train = len(dataset) - n_val
         self.train_ds, self.val_ds = random_split(
