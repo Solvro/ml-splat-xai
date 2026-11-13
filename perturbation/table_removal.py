@@ -11,7 +11,8 @@ from pathlib import Path
 
 import pandas as pd
 
-LEVEL = {"splat": "removed [%]", "voxel": "voxels removed (k)"}
+LEVEL = {"splat": "removed [%]", "voxel": "non-empty voxels removed [%]"}
+LEVEL_VOXEL_COUNT = "voxels removed (k)"
 
 
 def main():
@@ -19,7 +20,10 @@ def main():
     ap.add_argument("summary")
     ap.add_argument("--out", default=None)
     ap.add_argument("--digits", type=int, default=3)
+    ap.add_argument("--voxel_unit", choices=["percent", "count"], default="percent")
     a = ap.parse_args()
+    if a.voxel_unit == "count":
+        LEVEL["voxel"] = LEVEL_VOXEL_COUNT
     df = pd.read_csv(a.summary)
     out = Path(a.out or Path(a.summary).with_name("removal_table"))
     d = a.digits

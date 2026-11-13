@@ -170,6 +170,15 @@ def n_to_remove(n: int, percent: float) -> int:
     return int(round(n * percent / 100.0))
 
 
+def n_nonempty_voxels(imp: Importance) -> int:
+    return int((imp.point_counts > 0).sum())
+
+
+def n_voxels_from_percent(imp: Importance, percent: float) -> int:
+    """Number of voxels to remove = percent of THIS object's non-empty voxels (same rounding as splats)."""
+    return n_to_remove(n_nonempty_voxels(imp), percent)
+
+
 def keep_splat_importance(imp: Importance, percent: float) -> torch.Tensor:
     n = imp.point_scores.numel()
     r = n_to_remove(n, percent)

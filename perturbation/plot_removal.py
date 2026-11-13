@@ -13,12 +13,13 @@ import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd  # noqa: E402
 
 COLORS = {"importance": "#c0392b", "random": "#2c3e50"}
-XLABEL = {"splat": "points removed [%]", "voxel": "voxels removed (top-k)"}
+XLABEL = {"splat": "points removed [%]", "voxel": "non-empty voxels removed [%]"}
+XLABEL_VOXEL_COUNT = "voxels removed (top-k)"
 TITLE = {"splat": "point", "voxel": "voxel"}
 YLABEL = {"acc": "test accuracy", "agree": "agreement with clean prediction", "p_true": "p(true class)"}
 
 
-def draw(ax, df, mode, metric):
+def draw(ax, df, mode, metric, voxel_unit="percent"):
     for strat, g in df[df["mode"] == mode].groupby("strategy"):
         g = g.sort_values("level")
         y = g[f"{metric}_mean"]
@@ -26,7 +27,7 @@ def draw(ax, df, mode, metric):
         if metric == "acc":
             sd = g["acc_std_runs"].fillna(0)
             ax.fill_between(g["level"], y - sd, y + sd, color=COLORS.get(strat), alpha=0.15)
-    ax.set_xlabel(XLABEL[mode])
+    ax.set_xlabel(XLABEL_VOXEL_COUNT if (mode == "voxel" and voxel_unit == "count") else XLABEL[mode])
     ax.set_ylabel(YLABEL[metric])
     ax.set_ylim(0, 1)
     ax.grid(alpha=0.3)
@@ -47,6 +48,8 @@ def main():
     ap.add_argument("summary")
     ap.add_argument("--out", default=None)
     ap.add_argument("--metric", default="acc", choices=["acc", "agree", "p_true"])
+    ap.add_argument("--voxel_unit", choices=["percent", "count"], default="percent",
+                    help="how the voxel level was defined in the run (x-axis label only)")
     ap.add_argument("--separate", action="store_true", help="one figure per mode instead of side-by-side")
     a = ap.parse_args()
     df = pd.read_csv(a.summary)
@@ -55,12 +58,12 @@ def main():
     if a.separate:
         for mode in modes:
             fig, ax = plt.subplots(figsize=(5.5, 4))
-            draw(ax, df, mode, a.metric)
+            draw(ax, df, mode, a.metric, a.voxel_unit)
             save(fig, f"{out}_{mode}_{a.metric}")
         return
     fig, axes = plt.subplots(1, len(modes), figsize=(5.5 * len(modes), 4), squeeze=False)
     for ax, mode in zip(axes[0], modes):
-        draw(ax, df, mode, a.metric)
+        draw(ax, df, mode, a.metric, a.voxel_unit)
     save(fig, f"{out}_{a.metric}")
 
 

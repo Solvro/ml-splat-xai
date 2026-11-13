@@ -20,11 +20,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root
 
 from perturbation.removal import (  # noqa: E402
     ShapeSplatTest, classify, importance, keep_splat_importance, keep_splat_random,
-    keep_voxel_importance, keep_voxel_random, load_model, read_stage1_args,
+    keep_voxel_importance, keep_voxel_random, load_model, n_nonempty_voxels, n_voxels_from_percent,
+    read_stage1_args,
 )
 
 DEFAULT_PERCENTS = "0,1,2,5,10,20,30,40,50,60,70,80,90"
-DEFAULT_VOXEL_KS = "0,1,2,3,5,10,20,30,40,50,60,70,80,100"
+DEFAULT_VOXEL_KS = "0,1,2,3,5,10,20,30,40,50,60,70,80,100"      # --voxel_unit count (old behaviour)
+DEFAULT_VOXEL_PERCENTS = DEFAULT_PERCENTS                         # --voxel_unit percent (of non-empty voxels)
 
 
 def parse_list(s, typ):
@@ -66,14 +68,18 @@ def run(args):
                        pooling=pooling, head_size=head, device=device)
 
     percents = parse_list(args.percents, float)
-    voxel_ks = parse_list(args.voxel_ks, int)
+    voxel_levels = (parse_list(args.voxel_percents, float) if args.voxel_unit == "percent"
+                    else parse_list(args.voxel_ks, int))
     modes = parse_list(args.modes, str)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     meta = {**vars(args), "grid_size": grid, "pooling": pooling, "stn_3d": stn_3d,
             "stn_nd": stn_nd, "head_size": head, "device": device, "n_test": len(ds),
             "num_classes": ds.num_classes,
+            "voxel_level_meaning": ("percent of the object's non-empty voxels" if args.voxel_unit == "percent"
+                                    else "absolute number of voxels (capped at #non-empty)"),
             "notes": ("bs=1 exact deletion (mask=None); survivors keep original xyz_normalized and voxel_ids; "
+                      "voxels are only ever chosen among non-empty ones; "
                       "point scores = sum_{c in topK} w_c (U P)[c,n]; with max pooling U is applied after the "
                       "max, so point scores approximate each point's contribution")}
     (out / "meta.json").write_text(json.dumps(meta, indent=2))
@@ -102,13 +108,20 @@ def run(args):
                     keep = keep_splat_random(s.n, p, rng, device)
                     record(rows, {**base, "mode": "splat"}, "random", r, p, s, keep, model)
         if "voxel" in modes:
-            for k in voxel_ks:
+            n_ne = n_nonempty_voxels(imp)
+            vbase = {**base, "mode": "voxel", "n_voxels_nonempty": n_ne}
+            for lv in voxel_levels:
+                k = n_voxels_from_percent(imp, lv) if args.voxel_unit == "percent" else int(lv)
                 keep, ke = keep_voxel_importance(imp, s, k)
-                record(rows, {**base, "mode": "voxel"}, "importance", -1, k, s, keep, model, ke)
+                if args.check and args.voxel_unit == "percent":
+                    assert ke == round(n_ne * lv / 100) <= n_ne
+                record(rows, vbase, "importance", -1, lv, s, keep, model, ke)
                 for r in range(args.n_random):
-                    rng = np.random.default_rng([args.random_seed, r, i, k])
-                    keep, ke = keep_voxel_random(imp, s, k, rng)
-                    record(rows, {**base, "mode": "voxel"}, "random", r, k, s, keep, model, ke)
+                    rng = np.random.default_rng([args.random_seed, r, i, int(round(lv * 100))])
+                    keep, ke_r = keep_voxel_random(imp, s, k, rng)
+                    if args.check:
+                        assert ke_r == ke
+                    record(rows, vbase, "random", r, lv, s, keep, model, ke_r)
 
         if (i + 1) % 20 == 0 or i + 1 == n:
             print(f"[{i + 1}/{n}] {time.time() - t0:.0f}s", flush=True)
@@ -165,6 +178,9 @@ def main():
     ap.add_argument("--out", type=str)
     ap.add_argument("--modes", type=str, default="splat,voxel")
     ap.add_argument("--percents", type=str, default=DEFAULT_PERCENTS)
+    ap.add_argument("--voxel_unit", choices=["percent", "count"], default="percent",
+                    help="percent: level = %% of the object's non-empty voxels; count: level = absolute k (old)")
+    ap.add_argument("--voxel_percents", type=str, default=DEFAULT_VOXEL_PERCENTS)
     ap.add_argument("--voxel_ks", type=str, default=DEFAULT_VOXEL_KS)
     ap.add_argument("--topk_channels", type=int, default=5)
     ap.add_argument("--n_random", type=int, default=5)
