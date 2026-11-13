@@ -14,7 +14,7 @@ import pandas as pd  # noqa: E402
 
 COLORS = {"importance": "#c0392b", "random": "#2c3e50"}
 XLABEL = {"splat": "splats removed [%]", "voxel": "voxels removed (top-k)"}
-YLABEL = {"acc": "test accuracy", "agree": "agreement with clean prediction", "p_true": "accuracy"}
+YLABEL = {"acc": "test accuracy", "agree": "agreement with clean prediction", "p_true": "p(true class)"}
 
 
 def draw(ax, df, mode, metric):
