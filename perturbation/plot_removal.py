@@ -13,7 +13,8 @@ import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd  # noqa: E402
 
 COLORS = {"importance": "#c0392b", "random": "#2c3e50"}
-XLABEL = {"splat": "splats removed [%]", "voxel": "voxels removed (top-k)"}
+XLABEL = {"splat": "points removed [%]", "voxel": "voxels removed (top-k)"}
+TITLE = {"splat": "point", "voxel": "voxel"}
 YLABEL = {"acc": "test accuracy", "agree": "agreement with clean prediction", "p_true": "p(true class)"}
 
 
@@ -30,7 +31,7 @@ def draw(ax, df, mode, metric):
     ax.set_ylim(0, 1)
     ax.grid(alpha=0.3)
     ax.legend()
-    ax.set_title(f"{mode} removal")
+    ax.set_title(f"{TITLE.get(mode, mode)} removal")
 
 
 def save(fig, stem):
